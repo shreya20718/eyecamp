@@ -16,8 +16,8 @@
      return res.status(400).json({ message: 'Process already running' });
    }
 
-   const pythonCmd = process.env.PYTHON || 'python';
-   pyProc = spawn(pythonCmd, ['detect.py'], { cwd: __dirname });
+  const pythonCmd = process.env.PYTHON || 'python';
+  pyProc = spawn(pythonCmd, ['detect.py'], { cwd: __dirname, env: { ...process.env, HEADLESS: '1' } });
 
    pyProc.on('spawn', () => {
      console.log('detect.py started');
@@ -81,8 +81,8 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, running: Boolean(pyProc) });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
-});
 
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
 

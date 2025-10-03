@@ -18,6 +18,7 @@ import time
 import numpy as np
 import json
 import base64
+HEADLESS = os.environ.get("HEADLESS", "1") == "1"
 from collections import deque
 
 # ---------- Settings ----------
@@ -196,34 +197,36 @@ if not cap.isOpened():
 if not cap.isOpened():
     raise RuntimeError("Cannot open camera")
 
-cv2.namedWindow("Spectacle Eye Detector")
-cv2.setMouseCallback("Spectacle Eye Detector", mouse_callback)
+if not HEADLESS:
+    cv2.namedWindow("Spectacle Eye Detector")
+    cv2.setMouseCallback("Spectacle Eye Detector", mouse_callback)
 
 # ---------- Instruction screen ----------
-show_instructions = True
-while show_instructions:
-    ret, frame = cap.read()
-    if not ret:
-        break
-    frame_disp = frame.copy()
-    txt = [
-        "FINDING EYE CENTRE - PD Measurement",
-        "- Keep head level, tilt <= 5-6 degrees",
-        "- Position camera at eye level",
-        "- Click & drag green pupil markers to adjust manually",
-        "- R: Reset to latest auto   |   I: Reset to initial auto",
-        "- C: Capture   |   Esc: Exit"
-    ]
-    draw_instructions(frame_disp, txt)
-    cv2.imshow("Spectacle Eye Detector", frame_disp)
-    key = cv2.waitKey(1) & 0xFF
-    if key == 13 or key in [ord('s'), ord('S')]:
-        show_instructions = False
-        break
-    elif key == 27:
-        cap.release()
-        cv2.destroyAllWindows()
-        exit(0)
+if not HEADLESS:
+    show_instructions = True
+    while show_instructions:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_disp = frame.copy()
+        txt = [
+            "FINDING EYE CENTRE - PD Measurement",
+            "- Keep head level, tilt <= 5-6 degrees",
+            "- Position camera at eye level",
+            "- Click & drag green pupil markers to adjust manually",
+            "- R: Reset to latest auto   |   I: Reset to initial auto",
+            "- C: Capture   |   Esc: Exit"
+        ]
+        draw_instructions(frame_disp, txt)
+        cv2.imshow("Spectacle Eye Detector", frame_disp)
+        key = cv2.waitKey(1) & 0xFF
+        if key == 13 or key in [ord('s'), ord('S')]:
+            show_instructions = False
+            break
+        elif key == 27:
+            cap.release()
+            cv2.destroyAllWindows()
+            exit(0)
 
 # ---------- Main Loop ----------
 while True:
@@ -474,81 +477,82 @@ while True:
     except Exception:
         pass
 
-    cv2.imshow("Spectacle Eye Detector", disp)
-    key = cv2.waitKey(1) & 0xFF
+    if not HEADLESS:
+        cv2.imshow("Spectacle Eye Detector", disp)
+        key = cv2.waitKey(1) & 0xFF
 
-    if key in [ord('r'), ord('R')]:
-        manual_left_pupil = None
-        manual_right_pupil = None
-        print("Manual override cleared (reset to latest auto).")
-        continue
-    if key in [ord('i'), ord('I')]:
-        if initial_auto_left_pupil:
-            manual_left_pupil = initial_auto_left_pupil
-        else:
+        if key in [ord('r'), ord('R')]:
             manual_left_pupil = None
-        if initial_auto_right_pupil:
-            manual_right_pupil = initial_auto_right_pupil
-        else:
             manual_right_pupil = None
-        print("Manual override set to initial auto-detections (if available).")
-        continue
-
-    # ---------- Capture with adjustment ----------
-    if key in [ord('c'), ord('C')]:
-        ts = int(time.time())
-        img_name = os.path.join(CAPTURE_SAVE_DIR, f"capture_{ts}.png")
-        # Capture the current live cam image for review and saving
-        live_disp_clean = disp_clean.copy()
-        left_adj, right_adj, result = show_capture_review(
-            live_disp_clean, final_left, final_right, scale_to_use, avg_nose_line_point, VIEWER_LEFT_OPEN, VIEWER_RIGHT_OPEN
-        )
-        if result is True:
-            disp_save = live_disp_clean.copy()
-            # Draw overlays (oval) on save image (NO AR dot or instruction)
-            cv2.ellipse(disp_save, center, (axis_x, axis_y), 0, 0, 360, color_main, 4)
-            cv2.ellipse(disp_save, center, (axis_x-6, axis_y-6), 0, 0, 360, (255,255,255), 2)
-            # Draw adjusted markers only for open eyes
-            if VIEWER_LEFT_OPEN:
-                draw_sniper_cross(disp_save, left_adj, size=8, color=(0,255,0), thickness=1)
-            if VIEWER_RIGHT_OPEN:
-                draw_sniper_cross(disp_save, right_adj, size=8, color=(0,255,0), thickness=1)
-            # Update readings for saved image
-            y0 = 40
-            if VIEWER_LEFT_OPEN and VIEWER_RIGHT_OPEN:
-                pd_px = dist(left_adj, right_adj)
-                pd_mm = int(round(pd_px * scale_to_use)) if scale_to_use else 0
-                left_nose_mm = int(round(dist(left_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-                right_nose_mm = int(round(dist(right_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-                cv2.putText(disp_save, f"PD: {pd_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-                y0 += 30
-                cv2.putText(disp_save, f"Left→Nose: {left_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-                y0 += 30
-                cv2.putText(disp_save, f"Right→Nose: {right_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-            elif VIEWER_LEFT_OPEN:
-                left_nose_mm = int(round(dist(left_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-                cv2.putText(disp_save, f"Left→Nose: {left_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
-                y0 += 30
-                cv2.putText(disp_save, "Right eye: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-            elif VIEWER_RIGHT_OPEN:
-                right_nose_mm = int(round(dist(right_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-                cv2.putText(disp_save, f"Right→Nose: {right_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
-                y0 += 30
-                cv2.putText(disp_save, "Left eye: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+            print("Manual override cleared (reset to latest auto).")
+            continue
+        if key in [ord('i'), ord('I')]:
+            if initial_auto_left_pupil:
+                manual_left_pupil = initial_auto_left_pupil
             else:
-                cv2.putText(disp_save, "Both eyes: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-            cv2.imwrite(img_name, disp_save)
-            captured_items.append(img_name)
-            print(f"Capture saved: {img_name}")
-        elif result is False:
-            print("Retake capture.")
-            continue
-        else:
-            print("Capture cancelled.")
+                manual_left_pupil = None
+            if initial_auto_right_pupil:
+                manual_right_pupil = initial_auto_right_pupil
+            else:
+                manual_right_pupil = None
+            print("Manual override set to initial auto-detections (if available).")
             continue
 
-    if key == 27:
-        break
+        # ---------- Capture with adjustment ----------
+        if key in [ord('c'), ord('C')]:
+            ts = int(time.time())
+            img_name = os.path.join(CAPTURE_SAVE_DIR, f"capture_{ts}.png")
+            # Capture the current live cam image for review and saving
+            live_disp_clean = disp_clean.copy()
+            left_adj, right_adj, result = show_capture_review(
+                live_disp_clean, final_left, final_right, scale_to_use, avg_nose_line_point, VIEWER_LEFT_OPEN, VIEWER_RIGHT_OPEN
+            )
+            if result is True:
+                disp_save = live_disp_clean.copy()
+                # Draw overlays (oval) on save image (NO AR dot or instruction)
+                cv2.ellipse(disp_save, center, (axis_x, axis_y), 0, 0, 360, color_main, 4)
+                cv2.ellipse(disp_save, center, (axis_x-6, axis_y-6), 0, 0, 360, (255,255,255), 2)
+                # Draw adjusted markers only for open eyes
+                if VIEWER_LEFT_OPEN:
+                    draw_sniper_cross(disp_save, left_adj, size=8, color=(0,255,0), thickness=1)
+                if VIEWER_RIGHT_OPEN:
+                    draw_sniper_cross(disp_save, right_adj, size=8, color=(0,255,0), thickness=1)
+                # Update readings for saved image
+                y0 = 40
+                if VIEWER_LEFT_OPEN and VIEWER_RIGHT_OPEN:
+                    pd_px = dist(left_adj, right_adj)
+                    pd_mm = int(round(pd_px * scale_to_use)) if scale_to_use else 0
+                    left_nose_mm = int(round(dist(left_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
+                    right_nose_mm = int(round(dist(right_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
+                    cv2.putText(disp_save, f"PD: {pd_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
+                    y0 += 30
+                    cv2.putText(disp_save, f"Left→Nose: {left_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
+                    y0 += 30
+                    cv2.putText(disp_save, f"Right→Nose: {right_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
+                elif VIEWER_LEFT_OPEN:
+                    left_nose_mm = int(round(dist(left_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
+                    cv2.putText(disp_save, f"Left→Nose: {left_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
+                    y0 += 30
+                    cv2.putText(disp_save, "Right eye: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+                elif VIEWER_RIGHT_OPEN:
+                    right_nose_mm = int(round(dist(right_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
+                    cv2.putText(disp_save, f"Right→Nose: {right_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
+                    y0 += 30
+                    cv2.putText(disp_save, "Left eye: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+                else:
+                    cv2.putText(disp_save, "Both eyes: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
+                cv2.imwrite(img_name, disp_save)
+                captured_items.append(img_name)
+                print(f"Capture saved: {img_name}")
+            elif result is False:
+                print("Retake capture.")
+                continue
+            else:
+                print("Capture cancelled.")
+                continue
+
+        if key == 27:
+            break
 
 cap.release()
 cv2.destroyAllWindows()
