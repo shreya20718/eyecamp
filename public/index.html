@@ -1,0 +1,112 @@
+<body>
+  <h1>Detection Runner</h1>
+  <div>
+    <button id="start">Start</button>
+    <button id="stop">Stop</button>
+  </div>
+
+   <!-- In-page webcam preview; PD readings stream below via SSE. -->
+   <div style="position:relative; width:640px; height:480px; border:1px solid #000;">
+    <img id="annotated" src="" style="position:absolute; left:0; top:0; width:640px; height:480px; object-fit:cover; background:#000;" />
+     <canvas id="overlay" width="640" height="480" style="position:absolute; left:0; top:0; pointer-events:none;"></canvas>
+   </div>
+
+  <h3>Output</h3>
+  <pre id="log"></pre>
+
+  <script>
+     const logEl = document.getElementById('log');
+     const annotatedEl = document.getElementById('annotated');
+     const overlay = document.getElementById('overlay');
+     const ctx = overlay.getContext('2d');
+
+    function append(text) {
+      logEl.textContent += text + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    document.getElementById('start').addEventListener('click', async () => {
+      append('Starting...');
+      try {
+        const res = await fetch('/start', { method: 'POST' });
+        const data = await res.json();
+        append('Server: ' + JSON.stringify(data));
+
+         // Subscribe to SSE events for readings
+         if (window.evtSource) { window.evtSource.close(); }
+         window.evtSource = new EventSource('/events');
+         window.evtSource.onmessage = (e) => {
+           try {
+             const data = JSON.parse(e.data);
+             if (data.frame_b64) annotatedEl.src = data.frame_b64;
+             drawOverlay(data);
+             append(e.data);
+           } catch (_) {
+             append(e.data.trim());
+           }
+         };
+      } catch (e) {
+        append('Error: ' + e.message);
+      }
+    });
+
+    document.getElementById('stop').addEventListener('click', async () => {
+      append('Stopping...');
+      try {
+        const res = await fetch('/stop', { method: 'POST' });
+        const data = await res.json();
+        append('Server: ' + JSON.stringify(data));
+
+         if (window.evtSource) { window.evtSource.close(); window.evtSource = null; }
+         annotatedEl.src = '';
+      } catch (e) {
+        append('Error: ' + e.message);
+      }
+    });
+
+     function drawOverlay(d) {
+       if (!d || !ctx) return;
+       ctx.clearRect(0,0,overlay.width, overlay.height);
+       // Oval guide similar to Python
+       ctx.strokeStyle = d.alignment ? 'rgba(0,255,0,0.9)' : 'rgba(130,190,255,0.9)';
+       ctx.lineWidth = 4;
+       drawEllipse(ctx, overlay.width/2, overlay.height/2, overlay.width*0.23, overlay.height*0.40);
+       ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+       ctx.lineWidth = 2;
+       drawEllipse(ctx, overlay.width/2, overlay.height/2, overlay.width*0.23-6, overlay.height*0.40-6);
+
+       // Pupils
+       ctx.strokeStyle = '#00ff00';
+       ctx.lineWidth = 2;
+       if (d.left_eye) drawCross(ctx, d.left_eye[0], d.left_eye[1], 8);
+       if (d.right_eye) drawCross(ctx, d.right_eye[0], d.right_eye[1], 8);
+
+       // Readouts
+       ctx.fillStyle = 'rgba(255,255,0,0.95)';
+       ctx.font = '18px system-ui, Arial';
+       ctx.fillText(`PD: ${d.pd_mm ?? '--'} mm`, 20, 28);
+       ctx.fillStyle = 'rgba(255,255,0,0.95)';
+       if (d.left_to_nose_mm != null) ctx.fillText(`Left→Nose: ${d.left_to_nose_mm} mm`, 20, 56);
+       else ctx.fillText('Left eye: CLOSED', 20, 56);
+       if (d.right_to_nose_mm != null) ctx.fillText(`Right→Nose: ${d.right_to_nose_mm} mm`, 20, 82);
+       else ctx.fillText('Right eye: CLOSED', 20, 82);
+       ctx.fillStyle = Math.abs(d.head_tilt_deg||0) <= 6 ? 'rgba(0,200,200,0.95)' : 'rgba(255,0,0,0.95)';
+       ctx.fillText(`Head tilt: ${d.head_tilt_deg ?? 0}°`, 20, 108);
+     }
+
+     function drawCross(ctx, x, y, size) {
+       ctx.beginPath();
+       ctx.moveTo(x-size, y);
+       ctx.lineTo(x+size, y);
+       ctx.moveTo(x, y-size);
+       ctx.lineTo(x, y+size);
+       ctx.stroke();
+     }
+
+     function drawEllipse(ctx, cx, cy, rx, ry) {
+       ctx.beginPath();
+       ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI*2);
+       ctx.stroke();
+     }
+  </script>
+</body>
