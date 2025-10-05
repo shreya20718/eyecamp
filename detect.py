@@ -1,559 +1,541 @@
-# Spectacle Eye Detector — Full Version + Manual Adjustment + Reset Options
-# - Auto-detect pupils on each frame
-# - Click & drag pupil markers to manually correct positions
-# - R: reset manual marks to latest automatic detection
-# - I: reset manual marks to the initial (very first) automatic detection
-# - Thinner pupil markers for clear view
-# - Capture (C) with review + Save / Discard / Retake
-# - On capture: adjust markers and readings before saving
-# - AR focus mark at TOP for user alignment (live only)
-# - Only open eyes are editable and shown in capture review
-# - Bullet mark is only on open eye(s) in saved image
+"""Integrated Spectacle app
 
-import cv2
-import mediapipe as mp
-import math
+Tabs: "Pupil Detector" and "Frame Fitter"
+- reserves a top tab bar so image content is never covered
+- forwards mouse events to active tool (y translated by TAB_BAR_HEIGHT)
+
+This file depends on OpenCV, NumPy and MediaPipe (same as original scripts).
+"""
 import os
 import time
-import numpy as np
-import json
-import base64
-HEADLESS = os.environ.get("HEADLESS", "1") == "1"
+import math
 from collections import deque
 
-# ---------- Settings ----------
-iris_real_mm = 11.7
-HISTORY_LEN = 15
-HEAD_TILT_LIMIT_DEG = 6.0
-ALIGNMENT_IRIS_PX_MIN = 6
-ALIGNMENT_IRIS_PX_MAX = 45
-CAPTURE_SAVE_DIR = "./captures"
-os.makedirs(CAPTURE_SAVE_DIR, exist_ok=True)
+import cv2
+import numpy as np
+import mediapipe as mp
 
-# ---------- MediaPipe init ----------
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True,
-                                  max_num_faces=1,
-                                  min_detection_confidence=0.5,
-                                  min_tracking_confidence=0.5)
+# Import SpectacleFitterTool from v_FrameDetection if available
+try:
+    from v_FrameDetection import SpectacleFitterTool
+except Exception:
+    # try relative import fallback
+    try:
+        from .v_FrameDetection import SpectacleFitterTool
+    except Exception:
+        SpectacleFitterTool = None
 
-# ---------- State / smoothing ----------
-ipd_history = deque(maxlen=HISTORY_LEN)
-left_nose_history = deque(maxlen=HISTORY_LEN)
-right_nose_history = deque(maxlen=HISTORY_LEN)
-nose_line_history = deque(maxlen=HISTORY_LEN)
-scale_history = deque(maxlen=HISTORY_LEN)
+TAB_BAR_HEIGHT = 64
 
-# ---------- Manual override & auto storage ----------
-manual_left_pupil = None
-manual_right_pupil = None
-selected_eye = None  # "left" or "right"
 
-auto_left_pupil = None         # latest automatic detected left pupil (subject left / viewer left)
-auto_right_pupil = None        # latest automatic detected right pupil (subject right / viewer right)
-initial_auto_left_pupil = None # the very first automatic detection (persist)
-initial_auto_right_pupil = None
+class PupilDetector:
+    """A compact pupil detector module used inside the integrated app.
 
-captured_items = []
+    This is a simplified adaptation of the larger v_PupilDetection script focusing on
+    retaining the UI and mouse/button behaviors so it can run inside the tabbed window.
+    """
+    def __init__(self):
+        self.mp_face_mesh = mp.solutions.face_mesh
+        self.face_mesh = self.mp_face_mesh.FaceMesh(refine_landmarks=True,
+                                                   max_num_faces=1,
+                                                   min_detection_confidence=0.5,
+                                                   min_tracking_confidence=0.5)
 
-# ---------- Helpers ----------
-def dist(a, b):
-    return math.hypot(a[0]-b[0], a[1]-b[1]) if a and b else 0.0
+        self.manual_left_pupil = None
+        self.manual_right_pupil = None
+        self.selected_eye = None
 
-def angle_between_points_deg(p1, p2):
-    dx = p2[0]-p1[0]
-    dy = p2[1]-p1[1]
-    return math.degrees(math.atan2(dy, dx))
+        self.auto_left_pupil = None
+        self.auto_right_pupil = None
+        self.initial_auto_left_pupil = None
+        self.initial_auto_right_pupil = None
 
-def draw_sniper_cross(img, pos, size=20, color=(255,180,0), thickness=2):
-    if pos is None:
-        return
-    x, y = int(pos[0]), int(pos[1])
-    cv2.line(img, (x-size, y), (x+size, y), color, thickness)
-    cv2.line(img, (x, y-size), (x, y+size), color, thickness)
-    cv2.circle(img, (x, y), max(2, size//6), color, -1)
+        self.last_frame_shape = None
+        self.capture_requested = False
 
-def eye_aspect_ratio(landmarks, eye_points, w, h):
-    pts = [(int(landmarks[p].x * w), int(landmarks[p].y * h)) for p in eye_points]
-    if len(pts) != 6:
-        return 0.0
-    A = dist(pts[1], pts[5])
-    B = dist(pts[2], pts[4])
-    C = dist(pts[0], pts[3])
-    return (A + B) / (2.0 * C) if C > 0 else 0.0
+    def dist(self, a, b):
+        return math.hypot(a[0]-b[0], a[1]-b[1]) if a and b else 0.0
 
-def draw_instructions(frame, text_lines):
-    h, w, _ = frame.shape
-    overlay = frame.copy()
-    alpha = 0.85
-    cv2.rectangle(overlay, (20, 20), (w-20, h-20), (0,0,0), -1)
-    cv2.addWeighted(overlay, alpha, frame, 1-alpha, 0, frame)
-    y = 80
-    for line in text_lines:
-        cv2.putText(frame, line, (60, y), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255,255,255), 2)
-        y += 34
-    cv2.putText(frame, "Press Enter to START    |    S: Skip instructions", (60, y+10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (200,200,200), 1)
+    def get_button_layout(self, frame_shape):
+        h, w = frame_shape[0], frame_shape[1]
+        buttons = {}
+        margin = 12
+        btn_h = 36
+        btn_w = 140
+        x = margin
+        by = h - margin - btn_h
+        order = [
+            ('btn_capture', 'Capture'),
+            ('btn_reset', 'Reset'),
+            ('btn_reset_init', 'ResetInit'),
+            ('btn_quit', 'Quit')
+        ]
+        for key, label in order:
+            buttons[key] = (x, by, btn_w, btn_h, label)
+            x += btn_w + 12
+        return buttons
 
-def show_capture_review(img_clean, left_pupil, right_pupil, scale_to_use, avg_nose_line_point, left_open, right_open):
-    reviewing = True
-    dragging = None
-    offset = (0, 0)
-    updated_left = left_pupil
-    updated_right = right_pupil
-    h, w, _ = img_clean.shape
+    def draw_buttons(self, frame):
+        if frame is None:
+            return {}
+        h, w = frame.shape[:2]
+        self.last_frame_shape = (h, w)
+        overlay = frame.copy()
+        bar_h = 64
+        cv2.rectangle(overlay, (0, h - bar_h), (w, h), (0, 0, 0), -1)
+        alpha = 0.35
+        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+        layout = self.get_button_layout((h, w))
+        for key, (bx, by, bw, bh, label) in layout.items():
+            btn_color = (40, 40, 40)
+            cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), btn_color, -1)
+            cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (220, 220, 220), 2)
+            text_x = bx + 12
+            text_y = by + bh//2 + 6
+            cv2.putText(frame, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (245,245,245), 2)
+        return layout
 
-    def mouse_event(event, x, y, flags, param):
-        nonlocal dragging, updated_left, updated_right, offset
+    def handle_button_click(self, x, y):
+        if self.last_frame_shape is None:
+            return False
+        layout = self.get_button_layout(self.last_frame_shape)
+        for key, (bx, by, bw, bh, label) in layout.items():
+            if x >= bx and x <= bx + bw and y >= by and y <= by + bh:
+                if key == 'btn_capture':
+                    self.capture_requested = True
+                    return True
+                if key == 'btn_reset':
+                    self.manual_left_pupil = None
+                    self.manual_right_pupil = None
+                    return True
+                if key == 'btn_reset_init':
+                    if self.initial_auto_left_pupil:
+                        self.manual_left_pupil = self.initial_auto_left_pupil
+                    if self.initial_auto_right_pupil:
+                        self.manual_right_pupil = self.initial_auto_right_pupil
+                    return True
+                if key == 'btn_quit':
+                    return True
+        return False
+
+    def mouse_callback(self, event, x, y, flags, param):
+        # x,y already translated by TAB_BAR_HEIGHT in the integrator
         if event == cv2.EVENT_LBUTTONDOWN:
-            if left_open and updated_left and dist((x, y), updated_left) < 30:
-                dragging = 'left'
-                offset = (updated_left[0] - x, updated_left[1] - y)
-            elif right_open and updated_right and dist((x, y), updated_right) < 30:
-                dragging = 'right'
-                offset = (updated_right[0] - x, updated_right[1] - y)
-        elif event == cv2.EVENT_MOUSEMOVE and dragging:
-            if dragging == 'left' and left_open:
-                updated_left = (x + offset[0], y + offset[1])
-            elif dragging == 'right' and right_open:
-                updated_right = (x + offset[0], y + offset[1])
+            if self.handle_button_click(x, y):
+                return
+            if self.auto_left_pupil and self.dist((x, y), self.auto_left_pupil) < 30:
+                self.selected_eye = 'left'
+                self.manual_left_pupil = self.auto_left_pupil
+            elif self.auto_right_pupil and self.dist((x, y), self.auto_right_pupil) < 30:
+                self.selected_eye = 'right'
+                self.manual_right_pupil = self.auto_right_pupil
+
+        elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
+            if self.selected_eye == 'left':
+                self.manual_left_pupil = (x, y)
+            elif self.selected_eye == 'right':
+                self.manual_right_pupil = (x, y)
         elif event == cv2.EVENT_LBUTTONUP:
-            dragging = None
+            self.selected_eye = None
 
-    cv2.namedWindow("Capture Review")
-    cv2.setMouseCallback("Capture Review", mouse_event)
+    def process_frame(self, frame):
+        h, w = frame.shape[:2]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.face_mesh.process(rgb)
 
-    while reviewing:
-        review_disp = img_clean.copy()
-        # Draw markers only for open eyes
-        if left_open:
-            draw_sniper_cross(review_disp, updated_left, size=8, color=(0,255,0), thickness=1)
-        if right_open:
-            draw_sniper_cross(review_disp, updated_right, size=8, color=(0,255,0), thickness=1)
-        y0 = 40
-        # Show readings only for open eyes
-        if left_open and right_open:
-            pd_px = dist(updated_left, updated_right)
-            pd_mm = int(round(pd_px * scale_to_use)) if scale_to_use else 0
-            left_nose_mm = int(round(dist(updated_left, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-            right_nose_mm = int(round(dist(updated_right, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-            cv2.putText(review_disp, f"PD: {pd_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-            y0 += 30
-            cv2.putText(review_disp, f"Left→Nose: {left_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-            y0 += 30
-            cv2.putText(review_disp, f"Right→Nose: {right_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-        elif left_open:
-            left_nose_mm = int(round(dist(updated_left, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-            cv2.putText(review_disp, f"Left→Nose: {left_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
-            y0 += 30
-            cv2.putText(review_disp, "Right eye: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-        elif right_open:
-            right_nose_mm = int(round(dist(updated_right, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-            cv2.putText(review_disp, f"Right→Nose: {right_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
-            y0 += 30
-            cv2.putText(review_disp, "Left eye: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-        else:
-            cv2.putText(review_disp, "Both eyes: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-        # Instructions
-        cv2.putText(review_disp, "Drag green marks to adjust. S: Save  R: Retake  Esc: Cancel", (20, h-30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 2)
-        cv2.imshow("Capture Review", review_disp)
-        k = cv2.waitKey(1) & 0xFF
-        if k in [ord('s'), ord('S')]:
-            cv2.destroyWindow("Capture Review")
-            return updated_left, updated_right, True  # Save
-        elif k in [ord('r'), ord('R')]:
-            cv2.destroyWindow("Capture Review")
-            return None, None, False  # Retake
-        elif k == 27:
-            cv2.destroyWindow("Capture Review")
-            return None, None, None  # Cancel
+        self.auto_left_pupil = None
+        self.auto_right_pupil = None
 
-# ---------- Mouse callback for manual pupil adjustment ----------
-def mouse_callback(event, x, y, flags, param):
-    global manual_left_pupil, manual_right_pupil, selected_eye, auto_left_pupil, auto_right_pupil
-    # Only act on left button
-    if event == cv2.EVENT_LBUTTONDOWN:
-        # click near whichever pupil
-        if auto_left_pupil and dist((x, y), auto_left_pupil) < 30:
-            manual_left_pupil = (x, y)
-            selected_eye = "left"
-        elif auto_right_pupil and dist((x, y), auto_right_pupil) < 30:
-            manual_right_pupil = (x, y)
-            selected_eye = "right"
-    elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
-        if selected_eye == "left":
-            manual_left_pupil = (x, y)
-        elif selected_eye == "right":
-            manual_right_pupil = (x, y)
-    elif event == cv2.EVENT_LBUTTONUP:
-        selected_eye = None
+        pixels_per_mm = None
+        if results.multi_face_landmarks:
+            lm = results.multi_face_landmarks[0].landmark
+            try:
+                left_idxs = list(range(468, 474))
+                right_idxs = list(range(473, 479))
+                lpts = [(int(lm[i].x * w), int(lm[i].y * h)) for i in left_idxs if i < len(lm)]
+                rpts = [(int(lm[i].x * w), int(lm[i].y * h)) for i in right_idxs if i < len(lm)]
+                if lpts:
+                    self.auto_left_pupil = (int(sum([p[0] for p in lpts])/len(lpts)), int(sum([p[1] for p in lpts])/len(lpts)))
+                    if self.initial_auto_left_pupil is None:
+                        self.initial_auto_left_pupil = self.auto_left_pupil
+                if rpts:
+                    self.auto_right_pupil = (int(sum([p[0] for p in rpts])/len(rpts)), int(sum([p[1] for p in rpts])/len(rpts)))
+                    if self.initial_auto_right_pupil is None:
+                        self.initial_auto_right_pupil = self.auto_right_pupil
+                if len(lm) > 362:
+                    left_inner = (int(lm[133].x * w), int(lm[133].y * h))
+                    right_inner = (int(lm[362].x * w), int(lm[362].y * h))
+                    ipd_px = self.dist(left_inner, right_inner)
+                    if ipd_px > 0:
+                        pixels_per_mm = ipd_px / 63.0
+            except Exception:
+                pixels_per_mm = None
 
-# ---------- Camera & window ----------
-cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    cap.release()
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-if not cap.isOpened():
-    raise RuntimeError("Cannot open camera")
+        final_left = self.manual_left_pupil if self.manual_left_pupil is not None else self.auto_left_pupil
+        final_right = self.manual_right_pupil if self.manual_right_pupil is not None else self.auto_right_pupil
 
-if not HEADLESS:
-    cv2.namedWindow("Spectacle Eye Detector")
-    cv2.setMouseCallback("Spectacle Eye Detector", mouse_callback)
+        disp = frame.copy()
+        if final_left:
+            cv2.drawMarker(disp, final_left, (0,255,0), cv2.MARKER_CROSS, 8, 1)
+        if final_right:
+            cv2.drawMarker(disp, final_right, (0,255,0), cv2.MARKER_CROSS, 8, 1)
 
-# ---------- Instruction screen ----------
-if not HEADLESS:
-    show_instructions = True
-    while show_instructions:
+        if final_left and final_right and pixels_per_mm:
+            pd_px = self.dist(final_left, final_right)
+            pd_mm = int(round(pd_px / pixels_per_mm))
+            cv2.putText(disp, f"PD: {pd_mm} mm", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
+
+        self.draw_buttons(disp)
+        return disp
+
+
+def draw_tab_bar(frame, active_tab_index, tab_names):
+    h, w = frame.shape[:2]
+    bar = np.zeros((TAB_BAR_HEIGHT, w, 3), dtype=np.uint8)
+    bar[:] = (40, 40, 40)
+    # draw tabs
+    margin = 8
+    tab_w = 200
+    x = margin
+    for i, name in enumerate(tab_names):
+        color = (60, 160, 60) if i == active_tab_index else (100, 100, 100)
+        cv2.rectangle(bar, (x, 8), (x + tab_w, TAB_BAR_HEIGHT - 12), color, -1)
+        cv2.rectangle(bar, (x, 8), (x + tab_w, TAB_BAR_HEIGHT - 12), (220,220,220), 1)
+        txt_size = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+        tx = x + (tab_w - txt_size[0]) // 2
+        ty = (TAB_BAR_HEIGHT // 2) + (txt_size[1] // 2)
+        cv2.putText(bar, name, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+        x += tab_w + margin
+    return bar
+
+
+def main():
+    pupil = PupilDetector()
+    fitter = SpectacleFitterTool() if SpectacleFitterTool is not None else None
+
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        print("Error: Cannot open camera")
+        return
+
+    window_name = 'OptiFocus - Integrated'
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 1280, 720)
+
+    tab_names = ['Pupil Detector', 'Frame Fitter']
+    active_tab = 0
+
+    # mouse router
+    def on_mouse(event, x, y, flags, param):
+        nonlocal active_tab
+        # if click happened inside tab bar - check tab switches
+        if y <= TAB_BAR_HEIGHT:
+            # detect which tab clicked
+            # tabs are drawn starting at margin 8 and width 200
+            margin = 8
+            tab_w = 200
+            idx = (x - margin) // (tab_w + margin)
+            if 0 <= idx < len(tab_names):
+                active_tab = int(idx)
+            return
+
+        # translate y by removing tab bar before forwarding to tools
+        ty = y - TAB_BAR_HEIGHT
+        # forward to active tool
+        if active_tab == 0:
+            pupil.mouse_callback(event, x, ty, flags, None)
+        elif active_tab == 1 and fitter is not None:
+            fitter.mouse_callback(event, x, ty, flags, None)
+
+    cv2.setMouseCallback(window_name, on_mouse)
+
+    print("Integrated app starting. Tabs: ", tab_names)
+
+    while True:
         ret, frame = cap.read()
         if not ret:
             break
-        frame_disp = frame.copy()
-        txt = [
-            "FINDING EYE CENTRE - PD Measurement",
-            "- Keep head level, tilt <= 5-6 degrees",
-            "- Position camera at eye level",
-            "- Click & drag green pupil markers to adjust manually",
-            "- R: Reset to latest auto   |   I: Reset to initial auto",
-            "- C: Capture   |   Esc: Exit"
-        ]
-        draw_instructions(frame_disp, txt)
-        cv2.imshow("Spectacle Eye Detector", frame_disp)
-        key = cv2.waitKey(1) & 0xFF
-        if key == 13 or key in [ord('s'), ord('S')]:
-            show_instructions = False
-            break
-        elif key == 27:
-            cap.release()
-            cv2.destroyAllWindows()
-            exit(0)
+        frame = cv2.flip(frame, 1)
+        h, w = frame.shape[:2]
 
-# ---------- Main Loop ----------
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+        # prepare canvas taller by TAB_BAR_HEIGHT so tabs don't cover content
+        canvas = np.zeros((h + TAB_BAR_HEIGHT, w, 3), dtype=np.uint8)
+        # compute displayed area for tool (y offset TAB_BAR_HEIGHT)
+        tool_area = canvas[TAB_BAR_HEIGHT:TAB_BAR_HEIGHT + h, 0:w]
+        # copy frame into tool area
+        tool_area[:] = frame
 
-    h, w, _ = frame.shape
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb)
-
-    # defaults for this frame
-    ipd_mm = None
-    ipd_mm_avg = left_nose_avg = right_nose_avg = None
-    head_tilt_deg = 0.0
-    nose_center = None
-    avg_nose_line_point = None
-    iris_px = 0.0
-    VIEWER_LEFT_OPEN = VIEWER_RIGHT_OPEN = False
-    alignment_green = False
-
-    # --- Distance estimation variables ---
-    distance_mm = None
-    FOCAL_LENGTH_PX = 850  # Adjust for your camera if needed
-
-    # compute automatic detections (if any)
-    if results.multi_face_landmarks:
-        face_landmarks = results.multi_face_landmarks[0]
-        try:
-            # Auto pupil positions from MediaPipe (subject LEFT/RIGHT correspond to viewer LEFT/RIGHT)
-            auto_left = (int(face_landmarks.landmark[468].x * w), int(face_landmarks.landmark[468].y * h))
-            auto_right = (int(face_landmarks.landmark[473].x * w), int(face_landmarks.landmark[473].y * h))
-            nose_center = (int(face_landmarks.landmark[1].x * w), int(face_landmarks.landmark[1].y * h))
-
-            # store/update latest automatic positions
-            auto_left_pupil = auto_left
-            auto_right_pupil = auto_right
-            if initial_auto_left_pupil is None:
-                initial_auto_left_pupil = auto_left
-            if initial_auto_right_pupil is None:
-                initial_auto_right_pupil = auto_right
-
-            # Choose final pupil coords: manual override if set, otherwise automatic
-            final_left = manual_left_pupil if manual_left_pupil is not None else auto_left_pupil
-            final_right = manual_right_pupil if manual_right_pupil is not None else auto_right_pupil
-
-            # Eye closure detection (EAR) - using MediaPipe landmarks (not manual)
-            left_eye_idx  = [362, 385, 387, 263, 373, 386]
-            right_eye_idx = [33, 160, 158, 133, 153, 159]
-            ear_left  = eye_aspect_ratio(face_landmarks.landmark, left_eye_idx, w, h)
-            ear_right = eye_aspect_ratio(face_landmarks.landmark, right_eye_idx, w, h)
-            VIEWER_LEFT_OPEN  = ear_left  > 0.20
-            VIEWER_RIGHT_OPEN = ear_right > 0.20
-
-            # Iris scale (auto)
-            left_iris_px = dist((face_landmarks.landmark[469].x * w, face_landmarks.landmark[469].y * h),
-                                (face_landmarks.landmark[471].x * w, face_landmarks.landmark[471].y * h))
-            right_iris_px = dist((face_landmarks.landmark[474].x * w, face_landmarks.landmark[474].y * h),
-                                 (face_landmarks.landmark[476].x * w, face_landmarks.landmark[476].y * h))
-            iris_candidates = [v for v in [left_iris_px, right_iris_px] if v and v > 0]
-            if iris_candidates:
-                iris_px = sum(iris_candidates) / len(iris_candidates)
-                current_scale = iris_real_mm / iris_px if iris_px > 0 else 0.1
-                if current_scale > 0:
-                    scale_history.append(current_scale)
-            smoothed_scale = (sum(scale_history) / len(scale_history)) if len(scale_history) else None
-            scale_to_use = smoothed_scale if smoothed_scale and smoothed_scale > 0 else (
-                iris_real_mm / iris_px if iris_px > 0 else 0.1)
-
-            # --- Estimate distance from camera using iris size ---
-            if iris_px > 0:
-                distance_mm = int(round((iris_real_mm * FOCAL_LENGTH_PX) / iris_px))
-            else:
-                distance_mm = None
-
-            # Nose-line: compute horizontal line y using final pupils (manual override affects this)
-            if final_left and final_right:
-                eye_line_y = (final_left[1] + final_right[1]) / 2.0
-                head_tilt_deg = angle_between_points_deg(final_left, final_right)
-            else:
-                eye_line_y = h // 2
-                head_tilt_deg = 0.0
-
-            raw_nose_line_point = (nose_center[0], int(eye_line_y))
-            nose_line_history.append(raw_nose_line_point)
-            avg_nose_line_point = (int(sum(pt[0] for pt in nose_line_history) / len(nose_line_history)),
-                                   int(sum(pt[1] for pt in nose_line_history) / len(nose_line_history)))
-
-            # Distances (use final pupils)
-            if VIEWER_LEFT_OPEN and final_left:
-                left_to_nose_px = dist(final_left, avg_nose_line_point)
-                left_nose_val = left_to_nose_px * scale_to_use
-                left_nose_history.append(left_nose_val)
-                left_nose_avg = sum(left_nose_history) / len(left_nose_history)
-            else:
-                left_nose_avg = None
-
-            if VIEWER_RIGHT_OPEN and final_right:
-                right_to_nose_px = dist(final_right, avg_nose_line_point)
-                right_nose_val = right_to_nose_px * scale_to_use
-                right_nose_history.append(right_nose_val)
-                right_nose_avg = sum(right_nose_history) / len(right_nose_history)
-            else:
-                right_nose_avg = None
-
-            # PD logic (final pupils)
-            if VIEWER_LEFT_OPEN and VIEWER_RIGHT_OPEN and final_left and final_right:
-                ipd_px = dist(final_left, final_right)
-                ipd_mm = ipd_px * scale_to_use
-                ipd_history.append(ipd_mm)
-                ipd_mm_avg = sum(ipd_history) / len(ipd_history)
-            elif VIEWER_LEFT_OPEN and not VIEWER_RIGHT_OPEN:
-                ipd_mm_avg = left_nose_avg
-            elif VIEWER_RIGHT_OPEN and not VIEWER_LEFT_OPEN:
-                ipd_mm_avg = right_nose_avg
-            else:
-                ipd_mm_avg = None
-
-            # Alignment check (uses nose_center + iris + head tilt)
-            distance_ok = (iris_px and ALIGNMENT_IRIS_PX_MIN <= iris_px <= ALIGNMENT_IRIS_PX_MAX)
-            tilt_ok = abs(head_tilt_deg) <= HEAD_TILT_LIMIT_DEG
-            center = (w//2, h//2)
-            axis_x, axis_y = int(w*0.23), int(h*0.40)  # elongated oval
-            def point_in_ellipse(pt):
-                if not pt: return False
-                dx = (pt[0] - center[0]) / axis_x
-                dy = (pt[1] - center[1]) / axis_y
-                return dx*dx + dy*dy <= 1.0
-            alignment_green = distance_ok and tilt_ok and point_in_ellipse(nose_center)
-
-        except Exception as e:
-            print("Partial detection:", e)
-            final_left = manual_left_pupil if manual_left_pupil is not None else auto_left_pupil
-            final_right = manual_right_pupil if manual_right_pupil is not None else auto_right_pupil
-
-    else:
-        final_left = manual_left_pupil if manual_left_pupil is not None else auto_left_pupil
-        final_right = manual_right_pupil if manual_right_pupil is not None else auto_right_pupil
-
-    # ---------- Compose display frame ----------
-    blurred = cv2.GaussianBlur(frame, (51, 51), 0)
-    mask = np.zeros((h, w), dtype=np.uint8)
-    try:
-        axis_x, axis_y
-    except NameError:
-        axis_x, axis_y = int(w*0.23), int(h*0.40)
-    center = (w//2, h//2)
-    cv2.ellipse(mask, center, (axis_x, axis_y), 0, 0, 360, 255, -1)
-    sharp_inside = cv2.bitwise_and(frame, frame, mask=mask)
-    mask_inv = cv2.bitwise_not(mask)
-    blurred_outside = cv2.bitwise_and(blurred, blurred, mask=mask_inv)
-    disp_clean = cv2.add(sharp_inside, blurred_outside)  # <--- CLEAN IMAGE FOR CAPTURE/REVIEW
-
-    disp = disp_clean.copy()
-
-    color_main = (0, 220, 0) if alignment_green else (130, 190, 255)
-    cv2.ellipse(disp, center, (axis_x, axis_y), 0, 0, 360, color_main, 4)
-    cv2.ellipse(disp, center, (axis_x-6, axis_y-6), 0, 0, 360, (255,255,255), 2)
-    if alignment_green:
-        overlay = disp.copy()
-        cv2.ellipse(overlay, center, (axis_x, axis_y), 0, 0, 360, (0, 255, 0), -1)
-        cv2.addWeighted(overlay, 0.1, disp, 0.9, 0, disp)
-
-    # --- AR focus mark at TOP center (live only) ---
-    dot_center = (w//2, int(h*0.13))
-    cv2.circle(disp, dot_center, 5, (0, 0, 255), -1)  # Smaller red dot
-    cv2.circle(disp, dot_center, 10, (255, 255, 255), 1)  # Smaller white ring
-    cv2.putText(disp, "Look at the red dot", (dot_center[0]-55, dot_center[1]+20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,0,255), 1)
-
-    # --- Show distance feedback for "one hand distance" at bottom of frame ---
-    if iris_px > 0 and distance_mm:
-        msg_y = h - 60
-        msg_x = 60  # Move to left
-        if 550 <= distance_mm <= 750:
-            cv2.putText(disp, "Frame is accurately aligned (One hand distance)", (msg_x, msg_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 1)
-            alignment_green = True
+        if active_tab == 0:
+            disp = pupil.process_frame(tool_area.copy())
+            # remember last displayed annotated frame for pupil tool and handle capture
+            try:
+                pupil.last_display_frame = disp.copy()
+            except Exception:
+                pupil.last_display_frame = None
+            if getattr(pupil, 'capture_requested', False):
+                # reset flag and save current annotated frame
+                pupil.capture_requested = False
+                os.makedirs("./captures", exist_ok=True)
+                ts = int(time.time())
+                img_name = os.path.join("./captures", f"pupil_capture_{ts}.png")
+                try:
+                    if pupil.last_display_frame is not None:
+                        cv2.imwrite(img_name, pupil.last_display_frame)
+                        print(f"Capture saved: {img_name}")
+                    else:
+                        print("No frame available to save for pupil capture.")
+                except Exception as e:
+                    print("Failed to save capture:", e)
+        elif active_tab == 1 and fitter is not None:
+            # fitter expects full image; we forward the tool_area (no tab)
+            fitter.landmarks_data = fitter.get_face_landmarks(tool_area)
+            if fitter.landmarks_data and fitter.pixels_per_mm is None:
+                fitter.calibrate(fitter.landmarks_data, tool_area.shape)
+            if fitter.landmarks_data and not fitter.initial_lines_set and fitter.pixels_per_mm is not None:
+                fitter.setup_initial_lines(fitter.landmarks_data, tool_area)
+            disp = fitter.draw_all(tool_area.copy())
+            # store last displayed annotated frame so capture button can save it
+            try:
+                fitter.last_display_frame = disp.copy()
+            except Exception:
+                fitter.last_display_frame = None
         else:
-            cv2.putText(disp, f"Move {'closer' if distance_mm > 750 else 'farther'} to camera", (msg_x, msg_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 1)
+            disp = tool_area.copy()
 
-    fixed_cross = (w // 2, int(h * 0.42))
-    overlay_cross = disp.copy()
-    draw_sniper_cross(overlay_cross, fixed_cross, size=26, color=(120,120,60), thickness=1)
-    cv2.addWeighted(overlay_cross, 0.4, disp, 0.6, 0, disp)
+        # place disp back into canvas
+        canvas[TAB_BAR_HEIGHT:TAB_BAR_HEIGHT + h, 0:w] = disp
+        # draw tab bar
+        tabbar = draw_tab_bar(canvas, active_tab, tab_names)
+        canvas[0:TAB_BAR_HEIGHT, 0:w] = tabbar
 
-    if avg_nose_line_point:
-        cv2.drawMarker(disp, avg_nose_line_point, (80,80,80), cv2.MARKER_TILTED_CROSS, 12, 2)
+        cv2.imshow(window_name, canvas)
 
-    pupil_marker_size = 8
-    pupil_marker_thickness = 1
-    if 'final_left' in locals() and final_left:
-        cv2.drawMarker(disp, final_left, (0,255,0), cv2.MARKER_CROSS, pupil_marker_size, pupil_marker_thickness)
-    if 'final_right' in locals() and final_right:
-        cv2.drawMarker(disp, final_right, (0,255,0), cv2.MARKER_CROSS, pupil_marker_size, pupil_marker_thickness)
-
-    manual_status = []
-    if manual_left_pupil: manual_status.append("L")
-    if manual_right_pupil: manual_status.append("R")
-    if manual_status:
-        status_txt = "Manual: " + ",".join(manual_status)
-        cv2.putText(disp, status_txt, (w-220, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-
-    y0 = 30
-    cv2.putText(disp, f"PD: {int(round(ipd_mm_avg)) if ipd_mm_avg else '--'} mm", (20, y0),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-    y0 += 30
-    if VIEWER_LEFT_OPEN and left_nose_avg is not None:
-        cv2.putText(disp, f"Left→Nose: {int(round(left_nose_avg))} mm", (20, y0),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-    else:
-        cv2.putText(disp, "Left eye: CLOSED", (20, y0),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
-    y0 += 28
-    if VIEWER_RIGHT_OPEN and right_nose_avg is not None:
-        cv2.putText(disp, f"Right→Nose: {int(round(right_nose_avg))} mm", (20, y0),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-    else:
-        cv2.putText(disp, "Right eye: CLOSED", (20, y0),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
-    y0 += 28
-    cv2.putText(disp, f"Head tilt: {int(round(head_tilt_deg))}°", (20, y0),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                (0,200,200) if abs(head_tilt_deg) <= HEAD_TILT_LIMIT_DEG else (0,0,255), 2)
-
-    cv2.putText(disp, "C: Capture  |  Drag pupils to adjust  |  R: Reset auto  |  I: Reset initial  |  Esc: Exit",
-                (20, h-20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1)
-
-    # Stream a compact JSON summary for the web overlay
-    try:
-        # Encode the annotated frame so the web app can render exact pixels
-        _, jpg = cv2.imencode('.jpg', disp, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-        b64 = base64.b64encode(jpg.tobytes()).decode('ascii')
-        out = {
-            "pd_mm": int(round(ipd_mm_avg)) if ipd_mm_avg else None,
-            "left_to_nose_mm": int(round(left_nose_avg)) if left_nose_avg is not None else None,
-            "right_to_nose_mm": int(round(right_nose_avg)) if right_nose_avg is not None else None,
-            "head_tilt_deg": int(round(head_tilt_deg)) if head_tilt_deg is not None else None,
-            "alignment": bool(alignment_green),
-            "distance_mm": int(distance_mm) if distance_mm is not None else None,
-            "left_eye": list(final_left) if 'final_left' in locals() and final_left else None,
-            "right_eye": list(final_right) if 'final_right' in locals() and final_right else None,
-            "frame": {"w": int(w), "h": int(h)},
-            "frame_b64": "data:image/jpeg;base64," + b64
-        }
-        print(json.dumps(out), flush=True)
-    except Exception:
-        pass
-
-    if not HEADLESS:
-        cv2.imshow("Spectacle Eye Detector", disp)
         key = cv2.waitKey(1) & 0xFF
-
-        if key in [ord('r'), ord('R')]:
-            manual_left_pupil = None
-            manual_right_pupil = None
-            print("Manual override cleared (reset to latest auto).")
-            continue
-        if key in [ord('i'), ord('I')]:
-            if initial_auto_left_pupil:
-                manual_left_pupil = initial_auto_left_pupil
-            else:
-                manual_left_pupil = None
-            if initial_auto_right_pupil:
-                manual_right_pupil = initial_auto_right_pupil
-            else:
-                manual_right_pupil = None
-            print("Manual override set to initial auto-detections (if available).")
-            continue
-
-        # ---------- Capture with adjustment ----------
-        if key in [ord('c'), ord('C')]:
-            ts = int(time.time())
-            img_name = os.path.join(CAPTURE_SAVE_DIR, f"capture_{ts}.png")
-            # Capture the current live cam image for review and saving
-            live_disp_clean = disp_clean.copy()
-            left_adj, right_adj, result = show_capture_review(
-                live_disp_clean, final_left, final_right, scale_to_use, avg_nose_line_point, VIEWER_LEFT_OPEN, VIEWER_RIGHT_OPEN
-            )
-            if result is True:
-                disp_save = live_disp_clean.copy()
-                # Draw overlays (oval) on save image (NO AR dot or instruction)
-                cv2.ellipse(disp_save, center, (axis_x, axis_y), 0, 0, 360, color_main, 4)
-                cv2.ellipse(disp_save, center, (axis_x-6, axis_y-6), 0, 0, 360, (255,255,255), 2)
-                # Draw adjusted markers only for open eyes
-                if VIEWER_LEFT_OPEN:
-                    draw_sniper_cross(disp_save, left_adj, size=8, color=(0,255,0), thickness=1)
-                if VIEWER_RIGHT_OPEN:
-                    draw_sniper_cross(disp_save, right_adj, size=8, color=(0,255,0), thickness=1)
-                # Update readings for saved image
-                y0 = 40
-                if VIEWER_LEFT_OPEN and VIEWER_RIGHT_OPEN:
-                    pd_px = dist(left_adj, right_adj)
-                    pd_mm = int(round(pd_px * scale_to_use)) if scale_to_use else 0
-                    left_nose_mm = int(round(dist(left_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-                    right_nose_mm = int(round(dist(right_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-                    cv2.putText(disp_save, f"PD: {pd_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-                    y0 += 30
-                    cv2.putText(disp_save, f"Left→Nose: {left_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-                    y0 += 30
-                    cv2.putText(disp_save, f"Right→Nose: {right_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
-                elif VIEWER_LEFT_OPEN:
-                    left_nose_mm = int(round(dist(left_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-                    cv2.putText(disp_save, f"Left→Nose: {left_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
-                    y0 += 30
-                    cv2.putText(disp_save, "Right eye: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-                elif VIEWER_RIGHT_OPEN:
-                    right_nose_mm = int(round(dist(right_adj, avg_nose_line_point) * scale_to_use)) if avg_nose_line_point else 0
-                    cv2.putText(disp_save, f"Right→Nose: {right_nose_mm} mm", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,0), 2)
-                    y0 += 30
-                    cv2.putText(disp_save, "Left eye: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-                else:
-                    cv2.putText(disp_save, "Both eyes: CLOSED", (20, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
-                cv2.imwrite(img_name, disp_save)
-                captured_items.append(img_name)
-                print(f"Capture saved: {img_name}")
-            elif result is False:
-                print("Retake capture.")
-                continue
-            else:
-                print("Capture cancelled.")
-                continue
-
-        if key == 27:
+        if key == 27 or key == ord('q'):
             break
 
-cap.release()
-cv2.destroyAllWindows()
-print("Captured items:", captured_items)
+    cap.release()
+    cv2.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    main()
+import cv2
+import numpy as np
+import mediapipe as mp
+import math
+import time
+import os
+from collections import deque
+
+
+# Integrated app: two tabs (Pupil Detector, Frame Fitter)
+# - reserves a top tab bar so image content is never covered
+# - forwards mouse events to active tool (y translated by TAB_BAR_HEIGHT)
+
+TAB_BAR_HEIGHT = 64
+
+
+class PupilDetector:
+    """Simplified pupil detector based on the v_PupilDetection script.
+    Draws the same bottom buttons and supports basic mouse dragging for pupil markers.
+    """
+    def __init__(self):
+        self.mp_face_mesh = mp.solutions.face_mesh
+        self.face_mesh = self.mp_face_mesh.FaceMesh(refine_landmarks=True,
+                                                  max_num_faces=1,
+                                                  min_detection_confidence=0.5,
+                                                  min_tracking_confidence=0.5)
+
+        self.iris_real_mm = 11.7
+
+        import cv2
+        import numpy as np
+        import mediapipe as mp
+        import math
+        import time
+        import os
+        from collections import deque
+
+
+        # Integrated app: two tabs (Pupil Detector, Frame Fitter)
+        # - reserves a top tab bar so image content is never covered
+        # - forwards mouse events to active tool (y translated by TAB_BAR_HEIGHT)
+
+        TAB_BAR_HEIGHT = 64
+
+
+        class PupilDetector:
+            """Simplified pupil detector based on the v_PupilDetection script.
+            Draws the same bottom buttons and supports basic mouse dragging for pupil markers.
+            """
+            def __init__(self):
+                self.mp_face_mesh = mp.solutions.face_mesh
+                self.face_mesh = self.mp_face_mesh.FaceMesh(refine_landmarks=True,
+                                                           max_num_faces=1,
+                                                           min_detection_confidence=0.5,
+                                                           min_tracking_confidence=0.5)
+
+                self.iris_real_mm = 11.7
+                self.ipd_history = deque(maxlen=15)
+
+                self.manual_left_pupil = None
+                self.manual_right_pupil = None
+                self.selected_eye = None
+
+                self.auto_left_pupil = None
+                self.auto_right_pupil = None
+                self.initial_auto_left_pupil = None
+                self.initial_auto_right_pupil = None
+
+                self.last_display_frame = None
+                self.last_frame_shape = None
+                self.capture_requested = False
+
+            def dist(self, a, b):
+                return math.hypot(a[0]-b[0], a[1]-b[1]) if a and b else 0.0
+
+            def get_button_layout(self, frame_shape):
+                h, w = frame_shape[0], frame_shape[1]
+                buttons = {}
+                margin = 12
+                btn_h = 36
+                btn_w = 140
+                x = margin
+                by = h - margin - btn_h
+                order = [
+                    ('btn_capture', 'Capture'),
+                    ('btn_reset', 'Reset'),
+                    ('btn_reset_init', 'ResetInit'),
+                    ('btn_quit', 'Quit')
+                ]
+                for key, label in order:
+                    buttons[key] = (x, by, btn_w, btn_h, label)
+                    x += btn_w + 12
+                return buttons
+
+            def draw_buttons(self, frame):
+                if frame is None:
+                    return {}
+                h, w = frame.shape[:2]
+                self.last_frame_shape = (h, w)
+                overlay = frame.copy()
+                bar_h = 64
+                cv2.rectangle(overlay, (0, h - bar_h), (w, h), (0, 0, 0), -1)
+                alpha = 0.35
+                cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+                layout = self.get_button_layout((h, w))
+                for key, (bx, by, bw, bh, label) in layout.items():
+                    btn_color = (40, 40, 40)
+                    cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), btn_color, -1)
+                    cv2.rectangle(frame, (bx, by), (bx + bw, by + bh), (220, 220, 220), 2)
+                    text_x = bx + 12
+                    text_y = by + bh//2 + 6
+                    cv2.putText(frame, label, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (245,245,245), 2)
+                return layout
+
+            def handle_button_click(self, x, y):
+                if self.last_frame_shape is None:
+                    return False
+                layout = self.get_button_layout(self.last_frame_shape)
+                for key, (bx, by, bw, bh, label) in layout.items():
+                    if x >= bx and x <= bx + bw and y >= by and y <= by + bh:
+                        if key == 'btn_capture':
+                            self.capture_requested = True
+                            return True
+                        if key == 'btn_reset':
+                            self.manual_left_pupil = None
+                            self.manual_right_pupil = None
+                            return True
+                        if key == 'btn_reset_init':
+                            if self.initial_auto_left_pupil:
+                                self.manual_left_pupil = self.initial_auto_left_pupil
+                            if self.initial_auto_right_pupil:
+                                self.manual_right_pupil = self.initial_auto_right_pupil
+                            return True
+                        if key == 'btn_quit':
+                            # handled by main app
+                            return True
+                return False
+
+            def mouse_callback(self, event, x, y, flags, param):
+                # x,y already translated by TAB_BAR_HEIGHT in the integrator
+                if event == cv2.EVENT_LBUTTONDOWN:
+                    if self.handle_button_click(x, y):
+                        return
+                    # click near whichever pupil
+                    if self.auto_left_pupil and self.dist((x, y), self.auto_left_pupil) < 30:
+                        self.selected_eye = 'left'
+                        self.manual_left_pupil = self.auto_left_pupil
+                    elif self.auto_right_pupil and self.dist((x, y), self.auto_right_pupil) < 30:
+                        self.selected_eye = 'right'
+                        self.manual_right_pupil = self.auto_right_pupil
+
+                elif event == cv2.EVENT_MOUSEMOVE and (flags & cv2.EVENT_FLAG_LBUTTON):
+                    if self.selected_eye == 'left':
+                        self.manual_left_pupil = (x, y)
+                    elif self.selected_eye == 'right':
+                        self.manual_right_pupil = (x, y)
+                elif event == cv2.EVENT_LBUTTONUP:
+                    self.selected_eye = None
+
+            def process_frame(self, frame):
+                # returns annotated frame to be shown (image size unchanged)
+                h, w = frame.shape[:2]
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = self.face_mesh.process(rgb)
+
+                self.auto_left_pupil = None
+                self.auto_right_pupil = None
+
+                if results.multi_face_landmarks:
+                    lm = results.multi_face_landmarks[0].landmark
+                    # compute simple pupil centers by averaging iris landmarks if present
+                    # Mediapipe iris landmarks usually 468-473 (left) and 473-478 (right) — we'll attempt to use ranges
+                    try:
+                        left_idxs = list(range(468, 474))
+                        right_idxs = list(range(473, 479))
+                        lpts = [(int(lm[i].x * w), int(lm[i].y * h)) for i in left_idxs if i < len(lm)]
+                        rpts = [(int(lm[i].x * w), int(lm[i].y * h)) for i in right_idxs if i < len(lm)]
+                        if lpts:
+                            self.auto_left_pupil = (int(sum([p[0] for p in lpts])/len(lpts)), int(sum([p[1] for p in lpts])/len(lpts)))
+                            if self.initial_auto_left_pupil is None:
+                                self.initial_auto_left_pupil = self.auto_left_pupil
+                        if rpts:
+                            self.auto_right_pupil = (int(sum([p[0] for p in rpts])/len(rpts)), int(sum([p[1] for p in rpts])/len(rpts)))
+                            if self.initial_auto_right_pupil is None:
+                                self.initial_auto_right_pupil = self.auto_right_pupil
+                        # compute IPD scale using inner eye landmarks (133, 362)
+                        if len(lm) > 362:
+                            left_inner = (int(lm[133].x * w), int(lm[133].y * h))
+                            right_inner = (int(lm[362].x * w), int(lm[362].y * h))
+                            ipd_px = self.dist(left_inner, right_inner)
+                            if ipd_px > 0:
+                                pixels_per_mm = ipd_px / 63.0
+                            else:
+                                pixels_per_mm = None
+                        else:
+                            pixels_per_mm = None
+                    except Exception:
+                        pixels_per_mm = None
+
+                final_left = self.manual_left_pupil if self.manual_left_pupil is not None else self.auto_left_pupil
+                final_right = self.manual_right_pupil if self.manual_right_pupil is not None else self.auto_right_pupil
+
+                disp = frame.copy()
+                # draw markers
+                if final_left:
+                    cv2.drawMarker(disp, final_left, (0,255,0), cv2.MARKER_CROSS, 8, 1)
+                if final_right:
+                    cv2.drawMarker(disp, final_right, (0,255,0), cv2.MARKER_CROSS, 8, 1)
+
+                # show PD
+                if final_left and final_right and pixels_per_mm:
+                    pd_px = self.dist(final_left, final_right)
+                    pd_mm = int(round(pd_px / pixels_per_mm))
+                    cv2.putText(disp, f"PD: {pd_mm} mm", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
+                # draw bottom buttons
+                self.draw_buttons(disp)
+                self.last_display_frame = disp.copy()
+                return disp
+

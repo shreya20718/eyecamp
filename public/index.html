@@ -3,110 +3,585 @@
   <div>
     <button id="start">Start</button>
     <button id="stop">Stop</button>
+    <button id="capture">Capture</button>
+    <button id="resetAuto">Reset Auto</button>
+    <button id="resetInitial">Reset Initial</button>
   </div>
 
-   <!-- In-page webcam preview; PD readings stream below via SSE. -->
-   <div style="position:relative; width:640px; height:480px; border:1px solid #000;">
-    <img id="annotated" src="" style="position:absolute; left:0; top:0; width:640px; height:480px; object-fit:cover; background:#000;" />
-     <canvas id="overlay" width="640" height="480" style="position:absolute; left:0; top:0; pointer-events:none;"></canvas>
-   </div>
+  <div id="viewport" style="position:relative; width:640px; height:480px; border:1px solid #000;">
+    <video id="video" autoplay playsinline muted style="position:absolute; left:0; top:0; width:100%; height:100%; background:#000;"></video>
+    <canvas id="overlay" width="640" height="480" style="position:absolute; left:0; top:0; pointer-events:auto;"></canvas>
+  </div>
 
   <h3>Output</h3>
   <pre id="log"></pre>
 
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675465744/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1620248257/drawing_utils.js"></script>
   <script>
-     const logEl = document.getElementById('log');
-     const annotatedEl = document.getElementById('annotated');
-     const overlay = document.getElementById('overlay');
-     const ctx = overlay.getContext('2d');
+    const logEl = document.getElementById('log');
+    const videoEl = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const ctx = overlay.getContext('2d');
+    const viewport = document.getElementById('viewport');
+    let camera = null;
+    let running = false;
+    let frameCounter = 0;
 
-    function append(text) {
-      logEl.textContent += text + "\n";
+    // Mobile sizing
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const W = isMobile ? 480 : 640;
+    const H = isMobile ? 360 : 480;
+    overlay.width = W; overlay.height = H;
+    viewport.style.width = W + 'px';
+    viewport.style.height = H + 'px';
+
+    function append(text) { 
+      logEl.textContent = text + "\n"; 
       logEl.scrollTop = logEl.scrollHeight;
     }
 
-    document.getElementById('start').addEventListener('click', async () => {
-      append('Starting...');
-      try {
-        const res = await fetch('/start', { method: 'POST' });
-        const data = await res.json();
-        append('Server: ' + JSON.stringify(data));
+    function drawCross(ctx, x, y, size) {
+      ctx.beginPath();
+      ctx.moveTo(x-size, y);
+      ctx.lineTo(x+size, y);
+      ctx.moveTo(x, y-size);
+      ctx.lineTo(x, y+size);
+      ctx.stroke();
+    }
+    
+    function drawEllipse(ctx, cx, cy, rx, ry) {
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI*2);
+      ctx.stroke();
+    }
+    
+    function dist(a, b) { 
+      const dx=a[0]-b[0], dy=a[1]-b[1]; 
+      return Math.hypot(dx, dy); 
+    }
+    
+    function ear(lm, idx, w, h) {
+      const pts = idx.map(i => [lm[i].x*w, lm[i].y*h]);
+      if (pts.length !== 6) return 0;
+      const A = dist(pts[1], pts[5]);
+      const B = dist(pts[2], pts[4]);
+      const C = dist(pts[0], pts[3]);
+      return C>0 ? (A+B)/(2*C) : 0;
+    }
 
-         // Subscribe to SSE events for readings
-         if (window.evtSource) { window.evtSource.close(); }
-         window.evtSource = new EventSource('/events');
-         window.evtSource.onmessage = (e) => {
-           try {
-             const data = JSON.parse(e.data);
-             if (data.frame_b64) annotatedEl.src = data.frame_b64;
-             drawOverlay(data);
-             append(e.data);
-           } catch (_) {
-             append(e.data.trim());
-           }
-         };
-      } catch (e) {
-        append('Error: ' + e.message);
+    // Constants from detect.py
+    const LEFT_EYE_IDX = [362, 385, 387, 263, 373, 386];
+    const RIGHT_EYE_IDX = [33, 160, 158, 133, 153, 159];
+    const IRIS_REAL_MM = 11.7;
+    const FOCAL_PX = 850; // From detect.py
+    const ALIGNMENT_IRIS_PX_MIN = 6;
+    const ALIGNMENT_IRIS_PX_MAX = 45;
+    const HEAD_TILT_LIMIT_DEG = 6.0;
+    const histLen = 15; // HISTORY_LEN from detect.py
+    
+    // State variables from detect.py
+    const ipdHist = [];
+    const leftNoseHist = [];
+    const rightNoseHist = [];
+    const noseLineHist = [];
+    const scaleHist = [];
+    
+    // Manual override variables (from detect.py)
+    let manualLeftPupil = null;
+    let manualRightPupil = null;
+    let autoLeftPupil = null;
+    let autoRightPupil = null;
+    let initialAutoLeftPupil = null;
+    let initialAutoRightPupil = null;
+    let selectedEye = null;
+    let isDragging = false;
+    let capturedImages = [];
+
+    function onResults(results) {
+      if (!running) return;
+      frameCounter = (frameCounter + 1) % 2; // throttle: process every 2nd frame
+      if (frameCounter !== 0) return;
+      
+      const w = overlay.width, h = overlay.height;
+      ctx.clearRect(0,0,w,h);
+      
+      if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) return;
+      const lm = results.multiFaceLandmarks[0];
+
+      // Auto pupil positions from MediaPipe (subject LEFT/RIGHT correspond to viewer LEFT/RIGHT)
+      const autoLeft = [lm[468].x*w, lm[468].y*h];
+      const autoRight = [lm[473].x*w, lm[473].y*h];
+      const noseCenter = [lm[1].x*w, lm[1].y*h];
+
+      // Store/update latest automatic positions
+      autoLeftPupil = autoLeft;
+      autoRightPupil = autoRight;
+      if (initialAutoLeftPupil === null) {
+        initialAutoLeftPupil = autoLeft;
+      }
+      if (initialAutoRightPupil === null) {
+        initialAutoRightPupil = autoRight;
+      }
+
+      // Choose final pupil coords: manual override if set, otherwise automatic
+      const finalLeft = manualLeftPupil !== null ? manualLeftPupil : autoLeftPupil;
+      const finalRight = manualRightPupil !== null ? manualRightPupil : autoRightPupil;
+
+      // Eye closure detection (EAR) - using MediaPipe landmarks
+      const earLeft = ear(lm, LEFT_EYE_IDX, w, h);
+      const earRight = ear(lm, RIGHT_EYE_IDX, w, h);
+      const VIEWER_LEFT_OPEN = earLeft > 0.20;
+      const VIEWER_RIGHT_OPEN = earRight > 0.20;
+
+      // Iris scale (auto)
+      const leftIrisPx = dist([lm[469].x*w, lm[469].y*h], [lm[471].x*w, lm[471].y*h]);
+      const rightIrisPx = dist([lm[474].x*w, lm[474].y*h], [lm[476].x*w, lm[476].y*h]);
+      const irisCandidates = [leftIrisPx, rightIrisPx].filter(v => v && v > 0);
+      const irisPx = irisCandidates.length ? irisCandidates.reduce((a,b) => a+b, 0) / irisCandidates.length : 0;
+      
+      const currentScale = irisPx > 0 ? IRIS_REAL_MM / irisPx : 0;
+      if (currentScale > 0) {
+        scaleHist.push(currentScale);
+        if (scaleHist.length > histLen) scaleHist.shift();
+      }
+      const smoothedScale = scaleHist.length ? (scaleHist.reduce((a,b) => a+b, 0) / scaleHist.length) : null;
+      const scaleToUse = smoothedScale && smoothedScale > 0 ? smoothedScale : (irisPx > 0 ? IRIS_REAL_MM / irisPx : 0.1);
+
+      // Estimate distance from camera using iris size
+      const distanceMm = irisPx > 0 ? Math.round((IRIS_REAL_MM * FOCAL_PX) / irisPx) : null;
+
+      // Nose-line: compute horizontal line y using final pupils
+      let eyeLineY, headTiltDeg;
+      if (finalLeft && finalRight) {
+        eyeLineY = (finalLeft[1] + finalRight[1]) / 2.0;
+        headTiltDeg = Math.atan2(finalRight[1] - finalLeft[1], finalRight[0] - finalLeft[0]) * 180 / Math.PI;
+      } else {
+        eyeLineY = h / 2;
+        headTiltDeg = 0.0;
+      }
+
+      const rawNoseLinePoint = [noseCenter[0], eyeLineY];
+      noseLineHist.push(rawNoseLinePoint);
+      if (noseLineHist.length > histLen) noseLineHist.shift();
+      const avgNoseLinePoint = [
+        Math.round(noseLineHist.reduce((sum, pt) => sum + pt[0], 0) / noseLineHist.length),
+        Math.round(noseLineHist.reduce((sum, pt) => sum + pt[1], 0) / noseLineHist.length)
+      ];
+
+      // Distances (use final pupils)
+      let leftNoseAvg = null, rightNoseAvg = null;
+      if (VIEWER_LEFT_OPEN && finalLeft) {
+        const leftToNosePx = dist(finalLeft, avgNoseLinePoint);
+        const leftNoseVal = leftToNosePx * scaleToUse;
+        leftNoseHist.push(leftNoseVal);
+        if (leftNoseHist.length > histLen) leftNoseHist.shift();
+        leftNoseAvg = leftNoseHist.reduce((a,b) => a+b, 0) / leftNoseHist.length;
+      }
+
+      if (VIEWER_RIGHT_OPEN && finalRight) {
+        const rightToNosePx = dist(finalRight, avgNoseLinePoint);
+        const rightNoseVal = rightToNosePx * scaleToUse;
+        rightNoseHist.push(rightNoseVal);
+        if (rightNoseHist.length > histLen) rightNoseHist.shift();
+        rightNoseAvg = rightNoseHist.reduce((a,b) => a+b, 0) / rightNoseHist.length;
+      }
+
+      // PD logic (final pupils)
+      let ipdMmAvg = null;
+      if (VIEWER_LEFT_OPEN && VIEWER_RIGHT_OPEN && finalLeft && finalRight) {
+        const ipdPx = dist(finalLeft, finalRight);
+        const ipdMm = ipdPx * scaleToUse;
+        ipdHist.push(ipdMm);
+        if (ipdHist.length > histLen) ipdHist.shift();
+        ipdMmAvg = ipdHist.reduce((a,b) => a+b, 0) / ipdHist.length;
+      } else if (VIEWER_LEFT_OPEN && !VIEWER_RIGHT_OPEN) {
+        ipdMmAvg = leftNoseAvg;
+      } else if (VIEWER_RIGHT_OPEN && !VIEWER_LEFT_OPEN) {
+        ipdMmAvg = rightNoseAvg;
+      }
+
+      // Alignment check (uses nose_center + iris + head tilt)
+      const distanceOk = irisPx && irisPx >= ALIGNMENT_IRIS_PX_MIN && irisPx <= ALIGNMENT_IRIS_PX_MAX;
+      const tiltOk = Math.abs(headTiltDeg) <= HEAD_TILT_LIMIT_DEG;
+      const center = [w/2, h/2];
+      const axisX = w * 0.23, axisY = h * 0.40;
+      const dx = (noseCenter[0] - center[0]) / axisX;
+      const dy = (noseCenter[1] - center[1]) / axisY;
+      const alignment = distanceOk && tiltOk && (dx*dx + dy*dy <= 1.0);
+
+      // ---------- Compose display frame (from detect.py) ----------
+      const colorMain = alignment ? [0, 220, 0] : [130, 190, 255];
+      
+      // Draw guides and data
+      ctx.strokeStyle = `rgba(${colorMain[0]}, ${colorMain[1]}, ${colorMain[2]}, 0.9)`;
+      ctx.lineWidth = 4;
+      drawEllipse(ctx, center[0], center[1], axisX, axisY);
+      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+      ctx.lineWidth = 2;
+      drawEllipse(ctx, center[0], center[1], axisX-6, axisY-6);
+      
+      if (alignment) {
+        ctx.fillStyle = 'rgba(0, 255, 0, 0.1)';
+        ctx.beginPath();
+        ctx.ellipse(center[0], center[1], axisX, axisY, 0, 0, Math.PI*2);
+        ctx.fill();
+      }
+
+      // AR focus mark at TOP center (live only)
+      const dotCenter = [w/2, h*0.13];
+      ctx.fillStyle = '#ff0000';
+      ctx.beginPath();
+      ctx.arc(dotCenter[0], dotCenter[1], 5, 0, Math.PI*2);
+      ctx.fill();
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(dotCenter[0], dotCenter[1], 10, 0, Math.PI*2);
+      ctx.stroke();
+      ctx.fillStyle = '#ff0000';
+      ctx.font = '12px system-ui, Arial';
+      ctx.fillText('Look at the red dot', dotCenter[0]-55, dotCenter[1]+20);
+
+      // Show distance feedback for "one hand distance" at bottom of frame
+      if (irisPx > 0 && distanceMm) {
+        const msgY = h - 60;
+        const msgX = 60;
+        ctx.fillStyle = (distanceMm >= 550 && distanceMm <= 750) ? '#00ff00' : '#ff0000';
+        ctx.font = '16px system-ui, Arial';
+        const msg = (distanceMm >= 550 && distanceMm <= 750) ? 
+          'Frame is accurately aligned (One hand distance)' : 
+          `Move ${distanceMm > 750 ? 'closer' : 'farther'} to camera`;
+        ctx.fillText(msg, msgX, msgY);
+      }
+
+      // Fixed cross
+      const fixedCross = [w / 2, h * 0.42];
+      ctx.strokeStyle = 'rgba(120,120,60,0.4)';
+      ctx.lineWidth = 1;
+      drawCross(ctx, fixedCross[0], fixedCross[1], 26);
+
+      // Nose line marker
+      if (avgNoseLinePoint) {
+        ctx.strokeStyle = 'rgba(80,80,80,0.8)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(avgNoseLinePoint[0]-12, avgNoseLinePoint[1]);
+        ctx.lineTo(avgNoseLinePoint[0]+12, avgNoseLinePoint[1]);
+        ctx.moveTo(avgNoseLinePoint[0], avgNoseLinePoint[1]-12);
+        ctx.lineTo(avgNoseLinePoint[0], avgNoseLinePoint[1]+12);
+        ctx.stroke();
+      }
+
+      // Pupil markers
+      const pupilMarkerSize = 8;
+      const pupilMarkerThickness = 1;
+      ctx.strokeStyle = '#00ff00';
+      ctx.lineWidth = pupilMarkerThickness;
+      if (finalLeft) drawCross(ctx, finalLeft[0], finalLeft[1], pupilMarkerSize);
+      if (finalRight) drawCross(ctx, finalRight[0], finalRight[1], pupilMarkerSize);
+
+      // Manual status
+      const manualStatus = [];
+      if (manualLeftPupil) manualStatus.push("L");
+      if (manualRightPupil) manualStatus.push("R");
+      if (manualStatus.length) {
+        ctx.fillStyle = '#00ff00';
+        ctx.font = '14px system-ui, Arial';
+        ctx.fillText("Manual: " + manualStatus.join(","), w-220, 30);
+      }
+
+      // Readouts
+      ctx.fillStyle = 'rgba(255,255,0,0.95)';
+      ctx.font = '18px system-ui, Arial';
+      ctx.fillText(`PD: ${ipdMmAvg ? Math.round(ipdMmAvg) : '--'} mm`, 20, 30);
+      
+      if (VIEWER_LEFT_OPEN && leftNoseAvg !== null) {
+        ctx.fillText(`Left→Nose: ${Math.round(leftNoseAvg)} mm`, 20, 60);
+      } else {
+        ctx.fillText('Left eye: CLOSED', 20, 60);
+      }
+      
+      if (VIEWER_RIGHT_OPEN && rightNoseAvg !== null) {
+        ctx.fillText(`Right→Nose: ${Math.round(rightNoseAvg)} mm`, 20, 88);
+      } else {
+        ctx.fillText('Right eye: CLOSED', 20, 88);
+      }
+      
+      ctx.fillStyle = Math.abs(headTiltDeg) <= HEAD_TILT_LIMIT_DEG ? 'rgba(0,200,200,0.95)' : 'rgba(255,0,0,0.95)';
+      ctx.fillText(`Head tilt: ${Math.round(headTiltDeg)}°`, 20, 116);
+
+      // Instructions
+      ctx.fillStyle = 'rgba(180, 180, 180, 0.95)';
+      ctx.font = '12px system-ui, Arial';
+      ctx.fillText('C: Capture  |  Drag pupils to adjust  |  R: Reset auto  |  I: Reset initial  |  Esc: Exit', 20, h-20);
+
+      append(`PD: ${ipdMmAvg ? Math.round(ipdMmAvg) : '--'} mm | Left: ${leftNoseAvg ? Math.round(leftNoseAvg) : '--'} mm | Right: ${rightNoseAvg ? Math.round(rightNoseAvg) : '--'} mm | Tilt: ${Math.round(headTiltDeg)}°`);
+    }
+
+    let faceMesh = null;
+    let animationId = null;
+
+    document.getElementById('start').addEventListener('click', async () => {
+      if (running) return;
+      running = true;
+      append('Starting camera...');
+      
+      try {
+        // First try to get camera access
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            width: W, 
+            height: H, 
+            facingMode: 'user' 
+          } 
+        });
+        videoEl.srcObject = stream;
+        append('Camera access granted');
+        
+        // Wait for video to be ready
+        videoEl.onloadedmetadata = async () => {
+          append('Video loaded, initializing MediaPipe...');
+          
+          try {
+            faceMesh = new FaceMesh({
+              locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/${file}`
+            });
+            
+            faceMesh.setOptions({
+              maxNumFaces: 1,
+              refineLandmarks: true,
+              minDetectionConfidence: 0.6,
+              minTrackingConfidence: 0.6,
+              selfieMode: true,
+            });
+            
+            faceMesh.onResults(onResults);
+
+            // Start processing frames manually
+            const processFrame = async () => {
+              if (running && videoEl.readyState === 4) {
+                await faceMesh.send({ image: videoEl });
+                animationId = requestAnimationFrame(processFrame);
+              }
+            };
+            
+            await faceMesh.initialize();
+            append('MediaPipe initialized successfully');
+            processFrame();
+            
+          } catch (e) {
+            append('MediaPipe error: ' + e.message);
+            running = false;
+          }
+        };
+        
+      } catch (e) { 
+        append('Camera error: ' + e.message); 
+        running = false;
       }
     });
 
     document.getElementById('stop').addEventListener('click', async () => {
+      if (!running) return;
+      running = false;
       append('Stopping...');
-      try {
-        const res = await fetch('/stop', { method: 'POST' });
-        const data = await res.json();
-        append('Server: ' + JSON.stringify(data));
-
-         if (window.evtSource) { window.evtSource.close(); window.evtSource = null; }
-         annotatedEl.src = '';
+      
+      // Stop animation frame
+      if (animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
+      }
+      
+      // Stop MediaPipe
+      try { 
+        if (faceMesh) {
+          faceMesh.close();
+          faceMesh = null;
+        }
       } catch (e) {
-        append('Error: ' + e.message);
+        append('MediaPipe stop error: ' + e.message);
+      }
+      
+      // Stop camera stream
+      const stream = videoEl.srcObject; 
+      if (stream) { 
+        for (const t of stream.getTracks()) t.stop(); 
+        videoEl.srcObject = null;
+      }
+      
+      // Clear overlay
+      ctx.clearRect(0,0,overlay.width, overlay.height);
+      append('Camera stopped');
+    });
+
+    // Mouse interaction for manual pupil adjustment (from detect.py)
+    overlay.addEventListener('mousedown', (e) => {
+      if (!running) return;
+      const rect = overlay.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (overlay.width / rect.width);
+      const y = (e.clientY - rect.top) * (overlay.height / rect.height);
+      
+      // Check if clicking near pupils
+      if (autoLeftPupil && dist([x, y], autoLeftPupil) < 30) {
+        selectedEye = 'left';
+        manualLeftPupil = autoLeftPupil;
+        isDragging = true;
+      } else if (autoRightPupil && dist([x, y], autoRightPupil) < 30) {
+        selectedEye = 'right';
+        manualRightPupil = autoRightPupil;
+        isDragging = true;
       }
     });
 
-     function drawOverlay(d) {
-       if (!d || !ctx) return;
-       ctx.clearRect(0,0,overlay.width, overlay.height);
-       // Oval guide similar to Python
-       ctx.strokeStyle = d.alignment ? 'rgba(0,255,0,0.9)' : 'rgba(130,190,255,0.9)';
-       ctx.lineWidth = 4;
-       drawEllipse(ctx, overlay.width/2, overlay.height/2, overlay.width*0.23, overlay.height*0.40);
-       ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-       ctx.lineWidth = 2;
-       drawEllipse(ctx, overlay.width/2, overlay.height/2, overlay.width*0.23-6, overlay.height*0.40-6);
+    overlay.addEventListener('mousemove', (e) => {
+      if (!running || !isDragging) return;
+      const rect = overlay.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (overlay.width / rect.width);
+      const y = (e.clientY - rect.top) * (overlay.height / rect.height);
+      
+      if (selectedEye === 'left') {
+        manualLeftPupil = [x, y];
+      } else if (selectedEye === 'right') {
+        manualRightPupil = [x, y];
+      }
+    });
 
-       // Pupils
-       ctx.strokeStyle = '#00ff00';
-       ctx.lineWidth = 2;
-       if (d.left_eye) drawCross(ctx, d.left_eye[0], d.left_eye[1], 8);
-       if (d.right_eye) drawCross(ctx, d.right_eye[0], d.right_eye[1], 8);
+    overlay.addEventListener('mouseup', () => {
+      selectedEye = null;
+      isDragging = false;
+    });
 
-       // Readouts
-       ctx.fillStyle = 'rgba(255,255,0,0.95)';
-       ctx.font = '18px system-ui, Arial';
-       ctx.fillText(`PD: ${d.pd_mm ?? '--'} mm`, 20, 28);
-       ctx.fillStyle = 'rgba(255,255,0,0.95)';
-       if (d.left_to_nose_mm != null) ctx.fillText(`Left→Nose: ${d.left_to_nose_mm} mm`, 20, 56);
-       else ctx.fillText('Left eye: CLOSED', 20, 56);
-       if (d.right_to_nose_mm != null) ctx.fillText(`Right→Nose: ${d.right_to_nose_mm} mm`, 20, 82);
-       else ctx.fillText('Right eye: CLOSED', 20, 82);
-       ctx.fillStyle = Math.abs(d.head_tilt_deg||0) <= 6 ? 'rgba(0,200,200,0.95)' : 'rgba(255,0,0,0.95)';
-       ctx.fillText(`Head tilt: ${d.head_tilt_deg ?? 0}°`, 20, 108);
-     }
+    // Touch events for mobile
+    overlay.addEventListener('touchstart', (e) => {
+      e.preventDefault();
+      if (!running) return;
+      const rect = overlay.getBoundingClientRect();
+      const touch = e.touches[0];
+      const x = (touch.clientX - rect.left) * (overlay.width / rect.width);
+      const y = (touch.clientY - rect.top) * (overlay.height / rect.height);
+      
+      if (autoLeftPupil && dist([x, y], autoLeftPupil) < 30) {
+        selectedEye = 'left';
+        manualLeftPupil = autoLeftPupil;
+        isDragging = true;
+      } else if (autoRightPupil && dist([x, y], autoRightPupil) < 30) {
+        selectedEye = 'right';
+        manualRightPupil = autoRightPupil;
+        isDragging = true;
+      }
+    });
 
-     function drawCross(ctx, x, y, size) {
-       ctx.beginPath();
-       ctx.moveTo(x-size, y);
-       ctx.lineTo(x+size, y);
-       ctx.moveTo(x, y-size);
-       ctx.lineTo(x, y+size);
-       ctx.stroke();
-     }
+    overlay.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      if (!running || !isDragging) return;
+      const rect = overlay.getBoundingClientRect();
+      const touch = e.touches[0];
+      const x = (touch.clientX - rect.left) * (overlay.width / rect.width);
+      const y = (touch.clientY - rect.top) * (overlay.height / rect.height);
+      
+      if (selectedEye === 'left') {
+        manualLeftPupil = [x, y];
+      } else if (selectedEye === 'right') {
+        manualRightPupil = [x, y];
+      }
+    });
 
-     function drawEllipse(ctx, cx, cy, rx, ry) {
-       ctx.beginPath();
-       ctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI*2);
-       ctx.stroke();
-     }
+    overlay.addEventListener('touchend', (e) => {
+      e.preventDefault();
+      selectedEye = null;
+      isDragging = false;
+    });
+
+    // Reset Auto button
+    document.getElementById('resetAuto').addEventListener('click', () => {
+      manualLeftPupil = null;
+      manualRightPupil = null;
+      append('Manual override cleared (reset to latest auto)');
+    });
+
+    // Reset Initial button
+    document.getElementById('resetInitial').addEventListener('click', () => {
+      if (initialAutoLeftPupil) {
+        manualLeftPupil = initialAutoLeftPupil;
+      } else {
+        manualLeftPupil = null;
+      }
+      if (initialAutoRightPupil) {
+        manualRightPupil = initialAutoRightPupil;
+      } else {
+        manualRightPupil = null;
+      }
+      append('Manual override set to initial auto-detections');
+    });
+
+    // Capture functionality
+    document.getElementById('capture').addEventListener('click', () => {
+      if (!running) {
+        append('Start camera first');
+        return;
+      }
+      
+      // Create a canvas to capture the current frame with overlays
+      const captureCanvas = document.createElement('canvas');
+      captureCanvas.width = overlay.width;
+      captureCanvas.height = overlay.height;
+      const captureCtx = captureCanvas.getContext('2d');
+      
+      // Draw video frame
+      captureCtx.drawImage(videoEl, 0, 0, captureCanvas.width, captureCanvas.height);
+      
+      // Draw overlays
+      const tempCtx = overlay.getContext('2d');
+      const imageData = tempCtx.getImageData(0, 0, overlay.width, overlay.height);
+      captureCtx.putImageData(imageData, 0, 0);
+      
+      // Convert to blob and download
+      captureCanvas.toBlob((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `capture_${Date.now()}.png`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        capturedImages.push(a.download);
+        append(`Capture saved: ${a.download}`);
+      }, 'image/png');
+    });
+
+    // Keyboard controls (from detect.py)
+    document.addEventListener('keydown', (e) => {
+      if (!running) return;
+      
+      switch(e.key.toLowerCase()) {
+        case 'r':
+          manualLeftPupil = null;
+          manualRightPupil = null;
+          append('Manual override cleared (reset to latest auto)');
+          break;
+        case 'i':
+          if (initialAutoLeftPupil) {
+            manualLeftPupil = initialAutoLeftPupil;
+          } else {
+            manualLeftPupil = null;
+          }
+          if (initialAutoRightPupil) {
+            manualRightPupil = initialAutoRightPupil;
+          } else {
+            manualRightPupil = null;
+          }
+          append('Manual override set to initial auto-detections');
+          break;
+        case 'c':
+          document.getElementById('capture').click();
+          break;
+        case 'escape':
+          document.getElementById('stop').click();
+          break;
+      }
+    });
   </script>
 </body>
