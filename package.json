@@ -8,14 +8,23 @@
     "dev": "nodemon server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["pd", "pupillary-distance", "mediapipe", "face-detection", "measurement"],
+  "keywords": [
+    "pd",
+    "pupillary-distance",
+    "mediapipe",
+    "face-detection",
+    "measurement"
+  ],
   "author": "Your Name",
   "license": "MIT",
   "engines": {
     "node": ">=14.0.0"
   },
   "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
     "express": "^5.1.0",
+    "mongoose": "^8.19.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {

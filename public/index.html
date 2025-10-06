@@ -92,21 +92,28 @@
       border: 2px solid #4CAF50;
       border-radius: 8px;
       overflow: hidden;
+      min-height: 720px;
     }
     video, canvas, #capturedImg {
       display: block;
       width: 100%;
       height: auto;
+      min-height: 720px;
+      object-fit: contain;
     }
     video {
       position: absolute;
       top: 0;
       left: 0;
+      width: 100%;
+      height: 100%;
     }
     canvas {
       position: relative;
       z-index: 1;
       cursor: crosshair;
+      width: 100%;
+      height: 100%;
     }
     #capturedImg {
       position: absolute;
@@ -114,6 +121,8 @@
       left: 0;
       display: none;
       z-index: 0;
+      width: 100%;
+      height: 100%;
     }
     #log {
       background: #2a2a2a;
@@ -128,21 +137,6 @@
     }
     .tab-content { display: none; }
     .tab-content.active { display: block; }
-    .instructions {
-      background: #2a2a2a;
-      padding: 15px;
-      border-radius: 6px;
-      margin-bottom: 15px;
-      border-left: 4px solid #4CAF50;
-    }
-    .instructions h3 {
-      margin-bottom: 8px;
-      color: #4CAF50;
-    }
-    .instructions ul {
-      margin-left: 20px;
-      line-height: 1.8;
-    }
     .stable-indicator {
       background: #2a2a2a;
       padding: 10px 15px;
@@ -167,6 +161,15 @@
       0%, 100% { opacity: 1; }
       50% { opacity: 0.7; }
     }
+    @media (max-width: 768px) {
+      #viewport {
+        min-height: 480px;
+        max-width: 100%;
+      }
+      video, canvas, #capturedImg {
+        min-height: 480px;
+      }
+    }
   </style>
 </head>
 <body>
@@ -179,18 +182,6 @@
     </div>
 
     <div id="pupil-tab" class="tab-content active">
-      <div class="instructions">
-        <h3>Pupil Detection Instructions</h3>
-        <ul>
-          <li>Position at arm's length (60-75cm) from camera</li>
-          <li>Align your forehead with the target mark</li>
-          <li>Keep head straight and look at camera</li>
-          <li>Photo will auto-capture when properly aligned (3 sec hold)</li>
-          <li>After capture, drag green crosses to adjust pupil positions</li>
-          <li>Click "Save Result" to download with measurements</li>
-        </ul>
-      </div>
-      
       <div class="stable-indicator" id="pupil-stable">
         Align your face
       </div>
@@ -206,18 +197,6 @@
     </div>
 
     <div id="frame-tab" class="tab-content">
-      <div class="instructions">
-        <h3>Frame Fitting Instructions</h3>
-        <ul>
-          <li>Wear your glasses/spectacles</li>
-          <li>Position at arm's length from camera</li>
-          <li>Keep head straight and stable</li>
-          <li>Photo will auto-capture when stable (2 sec hold)</li>
-          <li>After capture, drag green corner handles to match frame edges</li>
-          <li>Toggle between LEFT and RIGHT frames to adjust both</li>
-        </ul>
-      </div>
-      
       <div class="stable-indicator" id="frame-stable">
         Keep stable
       </div>
@@ -245,6 +224,8 @@
 
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4.1633559619/face_mesh.js"></script>
   <script>
+    const API_BASE_URL = 'http://localhost:3000/api';
+
     const state = {
       currentTab: 'pupil',
       running: false,
@@ -269,12 +250,82 @@
     canvas.width = W;
     canvas.height = H;
 
-    const PUPIL_HOLD_FRAMES = 90; // 3 seconds at 30fps
-    const FRAME_HOLD_FRAMES = 60; // 2 seconds at 30fps
+    const PUPIL_HOLD_FRAMES = 90;
+    const FRAME_HOLD_FRAMES = 60;
 
     function log(msg) {
       const time = new Date().toLocaleTimeString();
       logEl.textContent = `[${time}] ${msg}\n` + logEl.textContent;
+    }
+
+    // Database saving functions
+    async function savePupilMeasurement(measurement, imageData, filename) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/measurements/pupil`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            pd: measurement.pd,
+            leftNose: measurement.leftNose,
+            rightNose: measurement.rightNose,
+            tilt: measurement.tilt,
+            distance: measurement.distance,
+            accuracy: measurement.accuracy,
+            filename: filename,
+            image: imageData,
+            timestamp: new Date().toISOString()
+          })
+        });
+
+        const result = await response.json();
+        
+        if (result.success) {
+          log(`✓ Saved to database (ID: ${result.id})`);
+          return result.id;
+        } else {
+          log(`✗ Database save failed: ${result.error}`);
+          return null;
+        }
+      } catch (error) {
+        log(`✗ Database error: ${error.message}`);
+        return null;
+      }
+    }
+
+    async function saveFrameMeasurement(measurement, imageData, filename) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/measurements/frame`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            leftWidth: measurement.leftWidth,
+            leftHeight: measurement.leftHeight,
+            rightWidth: measurement.rightWidth,
+            rightHeight: measurement.rightHeight,
+            bridge: measurement.bridge,
+            filename: filename,
+            image: imageData,
+            timestamp: new Date().toISOString()
+          })
+        });
+
+        const result = await response.json();
+        
+        if (result.success) {
+          log(`✓ Saved to database (ID: ${result.id})`);
+          return result.id;
+        } else {
+          log(`✗ Database save failed: ${result.error}`);
+          return null;
+        }
+      } catch (error) {
+        log(`✗ Database error: ${error.message}`);
+        return null;
+      }
     }
 
     document.querySelectorAll('.tab').forEach(tab => {
@@ -292,7 +343,6 @@
       });
     });
 
-    // ==================== PUPIL DETECTOR ====================
     const pupilDetector = {
       LEFT_EYE_IDX: [362, 385, 387, 263, 373, 386],
       RIGHT_EYE_IDX: [33, 160, 158, 133, 153, 159],
@@ -404,7 +454,6 @@
           ctx.fill();
         }
 
-        // Progress bar
         if (progress > 0) {
           const barWidth = 300;
           const barHeight = 20;
@@ -576,7 +625,6 @@
       }
     };
 
-    // ==================== FRAME FITTER ====================
     const frameFitter = {
       landmarks: null,
       pixelsPerMm: null,
@@ -634,7 +682,6 @@
       drawLiveView(progress) {
         ctx.clearRect(0, 0, W, H);
         
-        // Progress bar
         if (progress > 0) {
           const barWidth = 300;
           const barHeight = 20;
@@ -830,7 +877,6 @@
       }
     };
 
-    // ==================== CAMERA & MEDIAPIPE ====================
     async function startCamera() {
       if (state.running) return;
       state.running = true;
@@ -1090,7 +1136,7 @@
       ctx.clearRect(0, 0, W, H);
     }
 
-    function saveResult() {
+    async function saveResult() {
       if (!state.photoMode || !state.capturedImage) {
         log('Capture a photo first!');
         return;
@@ -1110,6 +1156,9 @@
       tempCtx.fillStyle = '#ffffff';
       tempCtx.font = 'bold 18px system-ui';
       
+      const timestamp = Date.now();
+      const filename = `${state.currentTab}_measurement_${timestamp}.png`;
+      
       if (state.currentTab === 'pupil' && state.lastMeasurement) {
         const m = state.lastMeasurement;
         tempCtx.fillText(`PD: ${m.pd} mm`, 20, H - 90);
@@ -1125,18 +1174,31 @@
         tempCtx.fillText(`Timestamp: ${new Date().toLocaleString()}`, 20, H - 40);
       }
       
-      tempCanvas.toBlob((blob) => {
+      tempCanvas.toBlob(async (blob) => {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${state.currentTab}_measurement_${Date.now()}.png`;
+        a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
-        log(`Saved: ${a.download}`);
+        log(`Downloaded: ${filename}`);
+        
+        const imageDataUrl = tempCanvas.toDataURL('image/png');
+        
+        if (state.currentTab === 'pupil') {
+          const dbId = await savePupilMeasurement(state.lastMeasurement, imageDataUrl, filename);
+          if (dbId) {
+            log(`Database ID: ${dbId}`);
+          }
+        } else if (state.currentTab === 'frame') {
+          const dbId = await saveFrameMeasurement(state.lastMeasurement, imageDataUrl, filename);
+          if (dbId) {
+            log(`Database ID: ${dbId}`);
+          }
+        }
       });
     }
 
-    // ==================== MOUSE EVENTS ====================
     canvas.addEventListener('mousedown', (e) => {
       if (!state.photoMode) return;
       
@@ -1277,7 +1339,6 @@
       canvas.dispatchEvent(new MouseEvent('mouseup'));
     });
 
-    // ==================== BUTTON EVENTS ====================
     document.getElementById('start-pupil').addEventListener('click', () => {
       state.currentTab = 'pupil';
       pupilDetector.reset();
@@ -1341,6 +1402,7 @@
     });
 
     log('OptiFocus ready. Start camera to begin auto-capture measurement.');
+    log('Make sure server is running on http://localhost:3000');
   </script>
 </body>
 </html>
