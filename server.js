@@ -8,18 +8,27 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors());
+// Enhanced CORS configuration for mobile deployment
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
+
+// Middleware with increased limits for image data
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // MongoDB Atlas Connection
-const MONGODB_URI = 'mongodb+srv://shreyagaikwad107_db_user:bKPS4n1iO6BTJYoN@cluster0.aortiot.mongodb.net/optifocus?retryWrites=true&w=majority';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://shreyagaikwad107_db_user:bKPS4n1iO6BTJYoN@cluster0.aortiot.mongodb.net/optifocus?retryWrites=true&w=majority';
 
 mongoose.connect(MONGODB_URI, {
   useNewUrlParser: true,
-  useUnifiedTopology: true
+  useUnifiedTopology: true,
+  serverSelectionTimeoutMS: 10000,
+  socketTimeoutMS: 45000,
 })
 .then(() => console.log('✓ MongoDB Atlas connected successfully'))
 .catch(err => console.error('✗ MongoDB connection error:', err));
@@ -57,10 +66,26 @@ const sseClients = new Set();
 
 // ==================== MEASUREMENT ROUTES ====================
 
-// Save pupil measurement
+// Save pupil measurement with enhanced error handling
 app.post('/api/measurements/pupil', async (req, res) => {
   try {
+    // Check MongoDB connection
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database connection unavailable'
+      });
+    }
+
     const { pd, leftNose, rightNose, tilt, distance, accuracy, filename, image, timestamp } = req.body;
+    
+    // Validate required fields
+    if (!pd || !leftNose || !rightNose || !tilt || !accuracy || !filename || !image) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields'
+      });
+    }
     
     const measurement = new PupilMeasurement({
       pd,
@@ -99,15 +124,31 @@ app.post('/api/measurements/pupil', async (req, res) => {
     console.error('Error saving pupil measurement:', error);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message || 'Failed to save measurement'
     });
   }
 });
 
-// Save frame measurement
+// Save frame measurement with enhanced error handling
 app.post('/api/measurements/frame', async (req, res) => {
   try {
+    // Check MongoDB connection
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database connection unavailable'
+      });
+    }
+
     const { leftWidth, leftHeight, rightWidth, rightHeight, bridge, filename, image, timestamp } = req.body;
+    
+    // Validate required fields
+    if (!leftWidth || !leftHeight || !rightWidth || !rightHeight || !bridge || !filename || !image) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields'
+      });
+    }
     
     const measurement = new FrameMeasurement({
       leftWidth,
@@ -144,7 +185,7 @@ app.post('/api/measurements/frame', async (req, res) => {
     console.error('Error saving frame measurement:', error);
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message || 'Failed to save measurement'
     });
   }
 });
@@ -154,7 +195,8 @@ app.get('/api/measurements/pupil', async (req, res) => {
   try {
     const measurements = await PupilMeasurement.find()
       .sort({ timestamp: -1 })
-      .select('-image');
+      .select('-image')
+      .limit(100);
     
     res.json({ 
       success: true, 
@@ -171,7 +213,8 @@ app.get('/api/measurements/frame', async (req, res) => {
   try {
     const measurements = await FrameMeasurement.find()
       .sort({ timestamp: -1 })
-      .select('-image');
+      .select('-image')
+      .limit(100);
     
     res.json({ 
       success: true, 
@@ -288,11 +331,22 @@ app.get('/health', (req, res) => {
   res.json({ 
     ok: true, 
     running: Boolean(pyProc),
-    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    dbState: mongoose.connection.readyState
+  });
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  res.status(500).json({
+    success: false,
+    error: err.message || 'Internal server error'
   });
 });
 
 app.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
   console.log(`MongoDB: ${mongoose.connection.readyState === 1 ? 'Connected' : 'Connecting...'}`);
+  console.log(`CORS enabled for all origins`);
 });

@@ -83,24 +83,24 @@
     button.camera-switch:hover {
       background: #F57C00;
     }
-    #viewport {
-      position: relative;
-      width: 100%;
-      max-width: 960px;
-      margin: 0 auto;
-      background: #000;
-      border: 2px solid #4CAF50;
-      border-radius: 8px;
-      overflow: hidden;
-      min-height: 720px;
-    }
-    video, canvas, #capturedImg {
-      display: block;
-      width: 100%;
-      height: auto;
-      min-height: 720px;
-      object-fit: contain;
-    }
+   #viewport {
+  position: relative;
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  background: #000;
+  border: 2px solid #4CAF50;
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 720px;
+}
+video, canvas, #capturedImg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 720px;
+  object-fit: cover;  /* Changed from contain */
+}
     video {
       position: absolute;
       top: 0;
@@ -161,15 +161,16 @@
       0%, 100% { opacity: 1; }
       50% { opacity: 0.7; }
     }
-    @media (max-width: 768px) {
-      #viewport {
-        min-height: 480px;
-        max-width: 100%;
-      }
-      video, canvas, #capturedImg {
-        min-height: 480px;
-      }
-    }
+   @media (max-width: 768px) {
+  #viewport {
+    min-height: 480px;
+    max-width: 100%;
+  }
+  video, canvas, #capturedImg {
+    min-height: 480px;
+    object-fit: cover;  /* Added this line */
+  }
+}
   </style>
 </head>
 <body>
@@ -389,12 +390,12 @@
 
       processLiveView(lm) {
         const center = [W / 2, H / 2];
-        const axisX = W * 0.23, axisY = H * 0.40;
+          const axisX = W * 0.35, axisY = H * 0.50; 
         
         const foreheadLandmark = lm[10];
         const foreheadCenter = [foreheadLandmark.x * W, foreheadLandmark.y * H];
         const foreheadTargetY = center[1] - (axisY * 0.7); 
-        const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) < 40;
+        const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) < 60;
 
         const stableIndicator = document.getElementById('pupil-stable');
         
@@ -1137,68 +1138,75 @@
     }
 
     async function saveResult() {
-      if (!state.photoMode || !state.capturedImage) {
-        log('Capture a photo first!');
-        return;
-      }
-      
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = W;
-      tempCanvas.height = H;
-      const tempCtx = tempCanvas.getContext('2d');
-      
-      tempCtx.drawImage(capturedImg, 0, 0, W, H);
-      tempCtx.drawImage(canvas, 0, 0);
-      
-      tempCtx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-      tempCtx.fillRect(0, H - 120, W, 120);
-      
-      tempCtx.fillStyle = '#ffffff';
-      tempCtx.font = 'bold 18px system-ui';
-      
-      const timestamp = Date.now();
-      const filename = `${state.currentTab}_measurement_${timestamp}.png`;
-      
-      if (state.currentTab === 'pupil' && state.lastMeasurement) {
-        const m = state.lastMeasurement;
-        tempCtx.fillText(`PD: ${m.pd} mm`, 20, H - 90);
-        tempCtx.fillText(`Left→Nose: ${m.leftNose} mm | Right→Nose: ${m.rightNose} mm`, 20, H - 65);
-        tempCtx.fillText(`Tilt: ${m.tilt}° | Distance: ${m.distance} mm`, 20, H - 40);
-        tempCtx.font = '14px system-ui';
-        tempCtx.fillText(`Timestamp: ${new Date().toLocaleString()}`, 20, H - 15);
-      } else if (state.currentTab === 'frame' && state.lastMeasurement) {
-        const m = state.lastMeasurement;
-        tempCtx.fillText(`Left: ${m.leftWidth}×${m.leftHeight} mm | Right: ${m.rightWidth}×${m.rightHeight} mm`, 20, H - 90);
-        tempCtx.fillText(`Bridge: ${m.bridge} mm`, 20, H - 65);
-        tempCtx.font = '14px system-ui';
-        tempCtx.fillText(`Timestamp: ${new Date().toLocaleString()}`, 20, H - 40);
-      }
-      
-      tempCanvas.toBlob(async (blob) => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-        log(`Downloaded: ${filename}`);
-        
-        const imageDataUrl = tempCanvas.toDataURL('image/png');
-        
-        if (state.currentTab === 'pupil') {
-          const dbId = await savePupilMeasurement(state.lastMeasurement, imageDataUrl, filename);
-          if (dbId) {
-            log(`Database ID: ${dbId}`);
-          }
-        } else if (state.currentTab === 'frame') {
-          const dbId = await saveFrameMeasurement(state.lastMeasurement, imageDataUrl, filename);
-          if (dbId) {
-            log(`Database ID: ${dbId}`);
-          }
-        }
-      });
+  if (!state.photoMode || !state.capturedImage) {
+    log('Capture a photo first!');
+    return;
+  }
+  
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = W;
+  tempCanvas.height = H;
+  const tempCtx = tempCanvas.getContext('2d');
+  
+  tempCtx.drawImage(capturedImg, 0, 0, W, H);
+  tempCtx.drawImage(canvas, 0, 0);
+  
+  tempCtx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+  tempCtx.fillRect(0, H - 120, W, 120);
+  
+  tempCtx.fillStyle = '#ffffff';
+  tempCtx.font = 'bold 18px system-ui';
+  
+  const timestamp = Date.now();
+  const filename = `${state.currentTab}_measurement_${timestamp}.png`;
+  
+  if (state.currentTab === 'pupil' && state.lastMeasurement) {
+    const m = state.lastMeasurement;
+    tempCtx.fillText(`PD: ${m.pd} mm`, 20, H - 90);
+    tempCtx.fillText(`Left→Nose: ${m.leftNose} mm | Right→Nose: ${m.rightNose} mm`, 20, H - 65);
+    tempCtx.fillText(`Tilt: ${m.tilt}° | Distance: ${m.distance} mm`, 20, H - 40);
+    tempCtx.font = '14px system-ui';
+    tempCtx.fillText(`Timestamp: ${new Date().toLocaleString()}`, 20, H - 15);
+  } else if (state.currentTab === 'frame' && state.lastMeasurement) {
+    const m = state.lastMeasurement;
+    tempCtx.fillText(`Left: ${m.leftWidth}×${m.leftHeight} mm | Right: ${m.rightWidth}×${m.rightHeight} mm`, 20, H - 90);
+    tempCtx.fillText(`Bridge: ${m.bridge} mm`, 20, H - 65);
+    tempCtx.font = '14px system-ui';
+    tempCtx.fillText(`Timestamp: ${new Date().toLocaleString()}`, 20, H - 40);
+  }
+  
+  const imageDataUrl = tempCanvas.toDataURL('image/png');
+  
+  // Save to database FIRST
+  let dbId = null;
+  try {
+    if (state.currentTab === 'pupil') {
+      dbId = await savePupilMeasurement(state.lastMeasurement, imageDataUrl, filename);
+    } else if (state.currentTab === 'frame') {
+      dbId = await saveFrameMeasurement(state.lastMeasurement, imageDataUrl, filename);
     }
-
+  } catch (err) {
+    log(`Database save error: ${err.message}`);
+  }
+  
+  // THEN download file
+  tempCanvas.toBlob(async (blob) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    
+    setTimeout(() => URL.revokeObjectURL(url), 100);
+    
+    log(`Downloaded: ${filename}`);
+    if (dbId) {
+      log(`Database ID: ${dbId}`);
+    }
+  }, 'image/png');
+}
     canvas.addEventListener('mousedown', (e) => {
       if (!state.photoMode) return;
       
