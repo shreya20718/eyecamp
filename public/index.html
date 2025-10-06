@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>OptiFocus - Photo Capture System</title>
+  <title>OptiFocus - Auto Capture System</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { 
@@ -76,6 +76,12 @@
     }
     button.danger:hover {
       background: #da190b;
+    }
+    button.camera-switch {
+      background: #FF9800;
+    }
+    button.camera-switch:hover {
+      background: #F57C00;
     }
     #viewport {
       position: relative;
@@ -151,11 +157,21 @@
       border-color: #4CAF50;
       color: #4CAF50;
     }
+    .stable-indicator.capturing {
+      background: #f57c00;
+      border-color: #ff9800;
+      color: #fff;
+      animation: pulse 0.5s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>OptiFocus - Photo Capture Measurement System</h1>
+    <h1>OptiFocus - Auto Capture System</h1>
     
     <div class="tabs">
       <div class="tab active" data-tab="pupil">Pupil Detector</div>
@@ -167,22 +183,22 @@
         <h3>Pupil Detection Instructions</h3>
         <ul>
           <li>Position at arm's length (60-75cm) from camera</li>
-          <li>Look at the camera center</li>
-          <li>Keep head straight</li>
-          <li>Wait for "STABLE" indicator</li>
-          <li>Click "Capture Photo" to freeze the image</li>
-          <li>Then drag the green pupil crosses to adjust position</li>
-          <li>Click "Save Result" to download measurement</li>
+          <li>Align your forehead with the target mark</li>
+          <li>Keep head straight and look at camera</li>
+          <li>Photo will auto-capture when properly aligned (3 sec hold)</li>
+          <li>After capture, drag green crosses to adjust pupil positions</li>
+          <li>Click "Save Result" to download with measurements</li>
         </ul>
       </div>
       
       <div class="stable-indicator" id="pupil-stable">
-        Waiting for stable position...
+        Align your face
       </div>
 
       <div class="controls">
         <button id="start-pupil">Start Camera</button>
-        <button id="capture-photo-pupil" class="secondary" disabled>Capture Photo</button>
+        <button id="switch-camera-pupil" class="camera-switch" disabled>Switch Camera</button>
+        <button id="retake-pupil" class="secondary" disabled style="display:none;">Retake Photo</button>
         <button id="reset-auto">Reset Manual (R)</button>
         <button id="save-pupil" class="danger" disabled>Save Result</button>
         <button id="stop-pupil">Stop</button>
@@ -195,22 +211,21 @@
         <ul>
           <li>Wear your glasses/spectacles</li>
           <li>Position at arm's length from camera</li>
-          <li>Keep head straight</li>
-          <li>Wait for "STABLE" indicator</li>
-          <li>Click "Capture Photo" to freeze the image</li>
-          <li>Then drag the green corner handles to match frame edges</li>
-          <li>Both frames are green - the active frame is brighter</li>
-          <li>Toggle between frames to adjust both lenses</li>
+          <li>Keep head straight and stable</li>
+          <li>Photo will auto-capture when stable (2 sec hold)</li>
+          <li>After capture, drag green corner handles to match frame edges</li>
+          <li>Toggle between LEFT and RIGHT frames to adjust both</li>
         </ul>
       </div>
       
       <div class="stable-indicator" id="frame-stable">
-        Waiting for stable position...
+        Keep stable
       </div>
       
       <div class="controls">
         <button id="start-frame">Start Camera</button>
-        <button id="capture-photo-frame" class="secondary" disabled>Capture Photo</button>
+        <button id="switch-camera-frame" class="camera-switch" disabled>Switch Camera</button>
+        <button id="retake-frame" class="secondary" disabled style="display:none;">Retake Photo</button>
         <button id="toggle-frame" disabled>Toggle Frame (Left)</button>
         <button id="reset-frame">Reset Lines</button>
         <button id="save-frame" class="danger" disabled>Save Result</button>
@@ -238,9 +253,10 @@
       photoMode: false,
       capturedImage: null,
       capturedLandmarks: null,
-      isStable: false,
-      stabilityCounter: 0,
-      lastMeasurement: null
+      lastMeasurement: null,
+      currentCamera: 'user',
+      alignmentHoldFrames: 0,
+      autoCapturing: false
     };
 
     const video = document.getElementById('video');
@@ -253,12 +269,14 @@
     canvas.width = W;
     canvas.height = H;
 
+    const PUPIL_HOLD_FRAMES = 90; // 3 seconds at 30fps
+    const FRAME_HOLD_FRAMES = 60; // 2 seconds at 30fps
+
     function log(msg) {
       const time = new Date().toLocaleTimeString();
       logEl.textContent = `[${time}] ${msg}\n` + logEl.textContent;
     }
 
-    // Tab switching
     document.querySelectorAll('.tab').forEach(tab => {
       tab.addEventListener('click', () => {
         const tabName = tab.dataset.tab;
@@ -278,12 +296,11 @@
     const pupilDetector = {
       LEFT_EYE_IDX: [362, 385, 387, 263, 373, 386],
       RIGHT_EYE_IDX: [33, 160, 158, 133, 153, 159],
-      LEFT_IRIS_INDICES: [468, 469, 470, 471, 472], // Center and 4 edge points
-      RIGHT_IRIS_INDICES: [473, 474, 475, 476, 477], // Center and 4 edge points
+      LEFT_IRIS_INDICES: [468, 469, 470, 471, 472],
+      RIGHT_IRIS_INDICES: [473, 474, 475, 476, 477],
       IRIS_REAL_MM: 11.7,
       FOCAL_PX: 850,
       HEAD_TILT_LIMIT_DEG: 6.0,
-      STABILITY_THRESHOLD: 30,
 
       manualLeftPupil: null,
       manualRightPupil: null,
@@ -297,17 +314,12 @@
         return Math.hypot(a[0] - b[0], a[1] - b[1]);
       },
 
-      // Calculate accurate pupil center using all iris landmarks
       calculatePupilCenter(lm, irisIndices) {
-        // Use all 5 iris points for better accuracy
         const points = irisIndices.map(idx => [lm[idx].x * W, lm[idx].y * H]);
+        const centerPoint = points[0]; 
+        const edgePoints = points.slice(1); 
         
-        // Weighted average: center point has more weight
-        const centerPoint = points[0]; // Index 0 is the center
-        const edgePoints = points.slice(1); // Remaining are edge points
-        
-        // Calculate centroid of edge points
-        let sumX = centerPoint[0] * 3; // Give center 3x weight
+        let sumX = centerPoint[0] * 3; 
         let sumY = centerPoint[1] * 3;
         
         edgePoints.forEach(p => {
@@ -319,160 +331,124 @@
         return [sumX / totalWeight, sumY / totalWeight];
       },
 
-      // Validate pupil detection quality
       validatePupilDetection(lm, leftPupil, rightPupil) {
-        // Check 1: Pupils should be roughly horizontally aligned
-        const verticalDiff = Math.abs(leftPupil[1] - rightPupil[1]);
-        const horizontalDist = Math.abs(leftPupil[0] - rightPupil[0]);
-        
-        if (verticalDiff > horizontalDist * 0.15) {
-          return false; // Too much vertical misalignment
-        }
-        
-        // Check 2: Distance between pupils should be reasonable (40-80mm equivalent)
+        if (!leftPupil || !rightPupil) return false;
         const pixelDist = this.dist(leftPupil, rightPupil);
-        if (pixelDist < 40 || pixelDist > 200) {
-          return false; // Unrealistic interpupillary distance
-        }
-        
-        // Check 3: Pupils should be within eye boundaries
-        const leftEyeCenter = [lm[468].x * W, lm[468].y * H];
-        const rightEyeCenter = [lm[473].x * W, lm[473].y * H];
-        
-        // Left pupil should be near left eye center
-        if (this.dist(leftPupil, leftEyeCenter) > 30) {
-          return false;
-        }
-        
-        // Right pupil should be near right eye center
-        if (this.dist(rightPupil, rightEyeCenter) > 30) {
-          return false;
-        }
-        
-        return true;
-      },
-
-      ear(lm, idx, w, h) {
-        const pts = idx.map(i => [lm[i].x * w, lm[i].y * h]);
-        if (pts.length !== 6) return 0;
-        const A = this.dist(pts[1], pts[5]);
-        const B = this.dist(pts[2], pts[4]);
-        const C = this.dist(pts[0], pts[3]);
-        return C > 0 ? (A + B) / (2 * C) : 0;
+        return pixelDist > 40 && pixelDist < 200;
       },
 
       processLiveView(lm) {
-        // Calculate accurate pupil positions using all iris landmarks
-        this.autoLeftPupil = this.calculatePupilCenter(lm, this.LEFT_IRIS_INDICES);
-        this.autoRightPupil = this.calculatePupilCenter(lm, this.RIGHT_IRIS_INDICES);
-
-        // Validate detection
-        const isValid = this.validatePupilDetection(lm, this.autoLeftPupil, this.autoRightPupil);
-
-        const finalLeft = this.autoLeftPupil;
-        const finalRight = this.autoRightPupil;
-
-        // Eye closure detection
-        const earLeft = this.ear(lm, this.LEFT_EYE_IDX, W, H);
-        const earRight = this.ear(lm, this.RIGHT_EYE_IDX, W, H);
-        const leftOpen = earLeft > 0.20;
-        const rightOpen = earRight > 0.20;
-
-        // Calculate head tilt
-        let headTiltDeg = 0;
-        if (finalLeft && finalRight) {
-          headTiltDeg = Math.atan2(finalRight[1] - finalLeft[1], finalRight[0] - finalLeft[0]) * 180 / Math.PI;
-        }
-
-        const tiltOk = Math.abs(headTiltDeg) <= this.HEAD_TILT_LIMIT_DEG;
-
-        // Check alignment
-        const noseCenter = [lm[1].x * W, lm[1].y * H];
         const center = [W / 2, H / 2];
         const axisX = W * 0.23, axisY = H * 0.40;
-        const dx = (noseCenter[0] - center[0]) / axisX;
-        const dy = (noseCenter[1] - center[1]) / axisY;
-        const alignment = tiltOk && leftOpen && rightOpen && isValid && (dx * dx + dy * dy <= 1.0);
+        
+        const foreheadLandmark = lm[10];
+        const foreheadCenter = [foreheadLandmark.x * W, foreheadLandmark.y * H];
+        const foreheadTargetY = center[1] - (axisY * 0.7); 
+        const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) < 40;
 
-        // Stability detection
-        if (alignment) {
-          state.stabilityCounter++;
-          if (state.stabilityCounter >= this.STABILITY_THRESHOLD) {
-            state.isStable = true;
+        const stableIndicator = document.getElementById('pupil-stable');
+        
+        if (foreheadAligned && !state.autoCapturing) {
+          state.alignmentHoldFrames++;
+          const progress = Math.min(100, (state.alignmentHoldFrames / PUPIL_HOLD_FRAMES) * 100);
+          
+          if (state.alignmentHoldFrames >= PUPIL_HOLD_FRAMES) {
+            state.autoCapturing = true;
+            stableIndicator.textContent = '📸 Capturing...';
+            stableIndicator.classList.add('capturing');
+            setTimeout(() => {
+              capturePhoto();
+              state.autoCapturing = false;
+              state.alignmentHoldFrames = 0;
+            }, 100);
+          } else {
+            stableIndicator.textContent = `Hold steady... ${Math.round(progress)}%`;
+            stableIndicator.classList.add('stable');
           }
         } else {
-          state.stabilityCounter = 0;
-          state.isStable = false;
+          state.alignmentHoldFrames = 0;
+          if (!state.autoCapturing) {
+            stableIndicator.textContent = 'Align your forehead at the mark';
+            stableIndicator.classList.remove('stable', 'capturing');
+          }
         }
 
-        // Update UI
-        const stableIndicator = document.getElementById('pupil-stable');
-        if (state.isStable) {
-          stableIndicator.textContent = '✓ STABLE - Ready to capture';
-          stableIndicator.classList.add('stable');
-          document.getElementById('capture-photo-pupil').disabled = false;
-        } else {
-          let statusMsg = `Stabilizing... (${state.stabilityCounter}/${this.STABILITY_THRESHOLD})`;
-          if (!isValid) statusMsg = 'Adjusting detection accuracy...';
-          if (!leftOpen || !rightOpen) statusMsg = 'Keep both eyes open';
-          if (!tiltOk) statusMsg = 'Straighten your head';
-          
-          stableIndicator.textContent = statusMsg;
-          stableIndicator.classList.remove('stable');
-          document.getElementById('capture-photo-pupil').disabled = true;
-        }
-
-        this.drawLiveView(center, axisX, axisY, alignment, isValid);
+        this.drawLiveView(center, axisX, axisY, foreheadCenter, foreheadTargetY, foreheadAligned, state.alignmentHoldFrames / PUPIL_HOLD_FRAMES);
       },
 
-      drawLiveView(ctr, axX, axY, aligned, isValid) {
+      drawLiveView(ctr, axX, axY, fCenter, fTargetY, fAligned, progress) {
         ctx.clearRect(0, 0, W, H);
         
-        const col = aligned && isValid ? [0, 220, 0] : [130, 190, 255];
-        
-        // Alignment oval
-        ctx.strokeStyle = `rgba(${col[0]}, ${col[1]}, ${col[2]}, 0.9)`;
+        ctx.strokeStyle = 'rgba(130, 190, 255, 0.9)';
         ctx.lineWidth = 4;
         ctx.beginPath();
         ctx.ellipse(ctr[0], ctr[1], axX, axY, 0, 0, Math.PI * 2);
         ctx.stroke();
 
-        if (aligned && isValid) {
-          ctx.fillStyle = 'rgba(0, 255, 0, 0.1)';
+        const targetColor = fAligned ? '#00ff00' : '#ffff00';
+        const targetSize = 10;
+        
+        ctx.strokeStyle = targetColor;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(ctr[0] - targetSize, fTargetY);
+        ctx.lineTo(ctr[0] + targetSize, fTargetY);
+        ctx.moveTo(ctr[0], fTargetY - targetSize);
+        ctx.lineTo(ctr[0], fTargetY + targetSize);
+        ctx.stroke();
+
+        if (fCenter) {
+          ctx.fillStyle = fAligned ? '#00ff00' : '#f44336';
           ctx.beginPath();
-          ctx.ellipse(ctr[0], ctr[1], axX, axY, 0, 0, Math.PI * 2);
+          ctx.arc(fCenter[0], fCenter[1], 5, 0, Math.PI * 2); 
           ctx.fill();
         }
 
-        // Accuracy indicator
-        ctx.fillStyle = isValid ? 'rgba(0, 255, 0, 0.95)' : 'rgba(255, 165, 0, 0.95)';
-        ctx.font = 'bold 14px system-ui';
-        ctx.fillText(isValid ? '✓ High Accuracy' : '⚠ Adjusting...', W/2 - 60, 30);
+        // Progress bar
+        if (progress > 0) {
+          const barWidth = 300;
+          const barHeight = 20;
+          const barX = (W - barWidth) / 2;
+          const barY = H - 80;
+          
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+          ctx.fillRect(barX - 5, barY - 5, barWidth + 10, barHeight + 10);
+          
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(barX, barY, barWidth, barHeight);
+          
+          ctx.fillStyle = '#4CAF50';
+          ctx.fillRect(barX, barY, barWidth * progress, barHeight);
+          
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 12px system-ui';
+          ctx.textAlign = 'center';
+          ctx.fillText(`${Math.round(progress * 100)}%`, W / 2, barY + 15);
+          ctx.textAlign = 'left';
+        }
 
-        ctx.fillStyle = 'rgba(180, 180, 180, 0.95)';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
         ctx.font = '14px system-ui';
-        ctx.fillText('Keep stable to enable capture', W/2 - 100, H - 20);
+        ctx.fillText('Align and hold steady - auto-capture in 3 seconds', W/2 - 180, H - 20);
       },
 
       processPhotoMode(lm) {
-        // Recalculate accurate pupil positions
         const detectedLeft = this.calculatePupilCenter(lm, this.LEFT_IRIS_INDICES);
         const detectedRight = this.calculatePupilCenter(lm, this.RIGHT_IRIS_INDICES);
         
-        // Use manual positions if set, otherwise use accurate detected positions
         const finalLeft = this.manualLeftPupil || detectedLeft;
         const finalRight = this.manualRightPupil || detectedRight;
 
-        // Calculate measurements
         const leftIrisPx = this.dist([lm[469].x * W, lm[469].y * H], [lm[471].x * W, lm[471].y * H]);
         const rightIrisPx = this.dist([lm[474].x * W, lm[474].y * H], [lm[476].x * W, lm[476].y * H]);
-        const irisPx = (leftIrisPx + rightIrisPx) / 2;
+        const irisDiameterPx = (leftIrisPx + rightIrisPx) / 2;
+        
+        const irisPx = irisDiameterPx;
         const scaleToUse = irisPx > 0 ? this.IRIS_REAL_MM / irisPx : 0.1;
 
-        // PD calculation
         const ipdMm = this.dist(finalLeft, finalRight) * scaleToUse;
 
-        // Nose line for eye-to-nose distance
         const noseCenter = [lm[1].x * W, lm[1].y * H];
         const eyeLineY = (finalLeft[1] + finalRight[1]) / 2;
         const noseLinePoint = [noseCenter[0], eyeLineY];
@@ -483,7 +459,6 @@
         const headTiltDeg = Math.atan2(finalRight[1] - finalLeft[1], finalRight[0] - finalLeft[0]) * 180 / Math.PI;
         const distanceMm = irisPx > 0 ? Math.round((this.IRIS_REAL_MM * this.FOCAL_PX) / irisPx) : null;
 
-        // Validate accuracy
         const isAccurate = this.validatePupilDetection(lm, finalLeft, finalRight);
 
         state.lastMeasurement = {
@@ -497,13 +472,22 @@
 
         this.drawPhotoMode(finalLeft, finalRight, noseLinePoint, ipdMm, leftNoseMm, rightNoseMm, headTiltDeg, distanceMm, isAccurate);
         
-        log(`PD: ${Math.round(ipdMm)} mm | L→N: ${Math.round(leftNoseMm)} mm | R→N: ${Math.round(rightNoseMm)} mm | Accuracy: ${isAccurate ? 'High' : 'Medium'}`);
+        log(`PD: ${Math.round(ipdMm)} mm | L→N: ${Math.round(leftNoseMm)} mm | R→N: ${Math.round(rightNoseMm)} mm`);
       },
 
       drawPhotoMode(fL, fR, nose, pd, lNose, rNose, tilt, dist, isAccurate) {
         ctx.clearRect(0, 0, W, H);
 
-        // Nose line marker
+        const lm = state.capturedLandmarks;
+        if (!lm) return;
+        
+        const leftIrisPx = this.dist([lm[469].x * W, lm[469].y * H], [lm[471].x * W, lm[471].y * H]);
+        const rightIrisPx = this.dist([lm[474].x * W, lm[474].y * H], [lm[476].x * W, lm[476].y * H]);
+        const irisDiameterPx = (leftIrisPx + rightIrisPx) / 2;
+        
+        const irisRadiusPx = irisDiameterPx / 2;
+        const crossSize = irisRadiusPx * 0.15; 
+
         if (nose) {
           ctx.strokeStyle = 'rgba(255,255,0,0.8)';
           ctx.lineWidth = 2;
@@ -515,11 +499,9 @@
           ctx.setLineDash([]);
         }
 
-        // PUPIL CROSS MARKERS with accuracy indicator
         const crossColor = isAccurate ? '#00ff00' : '#ffaa00';
         ctx.strokeStyle = crossColor;
         ctx.lineWidth = 3;
-        const crossSize = 12;
         
         if (fL) {
           ctx.beginPath();
@@ -529,12 +511,6 @@
           ctx.lineTo(fL[0], fL[1] + crossSize);
           ctx.stroke();
           
-          // Circle around pupil
-          ctx.beginPath();
-          ctx.arc(fL[0], fL[1], 20, 0, Math.PI * 2);
-          ctx.stroke();
-          
-          // Accuracy dot
           ctx.fillStyle = crossColor;
           ctx.beginPath();
           ctx.arc(fL[0], fL[1], 3, 0, Math.PI * 2);
@@ -549,19 +525,12 @@
           ctx.lineTo(fR[0], fR[1] + crossSize);
           ctx.stroke();
           
-          // Circle around pupil
-          ctx.beginPath();
-          ctx.arc(fR[0], fR[1], 20, 0, Math.PI * 2);
-          ctx.stroke();
-          
-          // Accuracy dot
           ctx.fillStyle = crossColor;
           ctx.beginPath();
           ctx.arc(fR[0], fR[1], 3, 0, Math.PI * 2);
           ctx.fill();
         }
-
-        // Line connecting pupils
+        
         if (fL && fR) {
           ctx.strokeStyle = 'rgba(255,0,0,0.6)';
           ctx.lineWidth = 2;
@@ -571,23 +540,20 @@
           ctx.stroke();
         }
 
-        // Accuracy indicator
         ctx.fillStyle = isAccurate ? 'rgba(0, 255, 0, 0.95)' : 'rgba(255, 165, 0, 0.95)';
         ctx.font = 'bold 14px system-ui';
-        ctx.fillText(isAccurate ? '✓ High Accuracy Detection' : '⚠ Medium Accuracy - Consider Manual Adjustment', 20, H - 45);
+        ctx.fillText(isAccurate ? '✓ High Accuracy' : '⚠ Medium Accuracy', 20, H - 45);
 
-        // Manual status indicator
         const man = [];
         if (this.manualLeftPupil) man.push("L");
         if (this.manualRightPupil) man.push("R");
         if (man.length) {
-          ctx.fillStyle = '#ffff00';
+          ctx.fillStyle = '#000000';
           ctx.font = 'bold 14px system-ui';
-          ctx.fillText("Manual Adjusted: " + man.join(","), W - 180, 30);
+          ctx.fillText("Manual: " + man.join(","), W - 150, 30);
         }
 
-        // Measurements display
-        ctx.fillStyle = 'rgba(255,255,0,0.95)';
+        ctx.fillStyle = '#000000';
         ctx.font = 'bold 20px system-ui';
         ctx.fillText(`PD: ${Math.round(pd)} mm`, 20, 35);
         
@@ -599,10 +565,9 @@
           ctx.fillText(`Distance: ${dist} mm`, 20, 140);
         }
 
-        // Instructions at bottom
         ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
         ctx.font = '14px system-ui';
-        ctx.fillText('Drag the green crosses to adjust pupil positions | Press R to reset', 20, H - 20);
+        ctx.fillText('Drag crosses to adjust | Press R to reset | Click Retake for new photo', 20, H - 20);
       },
 
       reset() {
@@ -620,7 +585,6 @@
       activeFrame: 'left',
       dragging: null,
       dragOffset: [0, 0],
-      STABILITY_THRESHOLD: 30,
 
       dist(a, b) {
         if (!a || !b) return 0;
@@ -628,7 +592,6 @@
       },
 
       processLiveView(lm) {
-        // Calibrate using IPD
         if (!this.pixelsPerMm) {
           const lIn = [lm[133].x * W, lm[133].y * H];
           const rIn = [lm[362].x * W, lm[362].y * H];
@@ -638,97 +601,109 @@
           }
         }
 
-        // Stability detection
-        if (this.pixelsPerMm) {
-          state.stabilityCounter++;
-          if (state.stabilityCounter >= this.STABILITY_THRESHOLD) {
-            state.isStable = true;
+        const stableIndicator = document.getElementById('frame-stable');
+        
+        if (this.pixelsPerMm && !state.autoCapturing) {
+          state.alignmentHoldFrames++;
+          const progress = Math.min(100, (state.alignmentHoldFrames / FRAME_HOLD_FRAMES) * 100);
+          
+          if (state.alignmentHoldFrames >= FRAME_HOLD_FRAMES) {
+            state.autoCapturing = true;
+            stableIndicator.textContent = '📸 Capturing...';
+            stableIndicator.classList.add('capturing');
+            setTimeout(() => {
+              capturePhoto();
+              state.autoCapturing = false;
+              state.alignmentHoldFrames = 0;
+            }, 100);
+          } else {
+            stableIndicator.textContent = `Hold steady... ${Math.round(progress)}%`;
+            stableIndicator.classList.add('stable');
           }
         } else {
-          state.stabilityCounter = 0;
-          state.isStable = false;
+          state.alignmentHoldFrames = 0;
+          if (!state.autoCapturing) {
+            stableIndicator.textContent = 'Keep stable';
+            stableIndicator.classList.remove('stable', 'capturing');
+          }
         }
 
-        // Update UI
-        const stableIndicator = document.getElementById('frame-stable');
-        if (state.isStable) {
-          stableIndicator.textContent = '✓ STABLE - Ready to capture';
-          stableIndicator.classList.add('stable');
-          document.getElementById('capture-photo-frame').disabled = false;
-        } else {
-          stableIndicator.textContent = `Stabilizing... (${state.stabilityCounter}/${this.STABILITY_THRESHOLD})`;
-          stableIndicator.classList.remove('stable');
-          document.getElementById('capture-photo-frame').disabled = true;
-        }
-
-        this.drawLiveView();
+        this.drawLiveView(state.alignmentHoldFrames / FRAME_HOLD_FRAMES);
       },
 
-      drawLiveView() {
+      drawLiveView(progress) {
         ctx.clearRect(0, 0, W, H);
-        ctx.fillStyle = 'rgba(180, 180, 180, 0.95)';
+        
+        // Progress bar
+        if (progress > 0) {
+          const barWidth = 300;
+          const barHeight = 20;
+          const barX = (W - barWidth) / 2;
+          const barY = H - 80;
+          
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+          ctx.fillRect(barX - 5, barY - 5, barWidth + 10, barHeight + 10);
+          
+          ctx.strokeStyle = '#fff';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(barX, barY, barWidth, barHeight);
+          
+          ctx.fillStyle = '#4CAF50';
+          ctx.fillRect(barX, barY, barWidth * progress, barHeight);
+          
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 12px system-ui';
+          ctx.textAlign = 'center';
+          ctx.fillText(`${Math.round(progress * 100)}%`, W / 2, barY + 15);
+          ctx.textAlign = 'left';
+        }
+        
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
         ctx.font = '14px system-ui';
-        ctx.fillText('Keep stable to enable capture', W/2 - 100, H - 20);
+        ctx.fillText('Keep stable - auto-capture in 2 seconds', W/2 - 150, H - 20);
       },
 
       initLines(lm) {
         const lBrow = [lm[70].x * W, lm[70].y * H];
         const rBrow = [lm[300].x * W, lm[300].y * H];
-        const lOut = [lm[33].x * W, lm[33].y * H];
-        const rOut = [lm[263].x * W, lm[263].y * H];
         const lCheek = [lm[205].x * W, lm[205].y * H];
         const rCheek = [lm[425].x * W, lm[425].y * H];
-        const noseCenter = [lm[1].x * W, lm[1].y * H];
 
         const topY = Math.min(lBrow[1], rBrow[1]) - 20;
         const botY = Math.max(lCheek[1], rCheek[1]) - 30;
         
-        // Reduce frame width by 30% from original
-        const frameWidth = 50; // Fixed narrow width in pixels
-        const frameHeight = botY - topY;
-
-        // Left eye center
+        const frameWidth = 50;
         const leftEyeCenter = [lm[468].x * W, lm[468].y * H];
-        // Right eye center
         const rightEyeCenter = [lm[473].x * W, lm[473].y * H];
 
-        // Left frame (green) - centered on left eye
         this.leftFrame.top = { x1: leftEyeCenter[0] - frameWidth/2, y1: topY, x2: leftEyeCenter[0] + frameWidth/2, y2: topY };
         this.leftFrame.bottom = { x1: leftEyeCenter[0] - frameWidth/2, y1: botY, x2: leftEyeCenter[0] + frameWidth/2, y2: botY };
         this.leftFrame.left = { x1: leftEyeCenter[0] - frameWidth/2, y1: topY, x2: leftEyeCenter[0] - frameWidth/2, y2: botY };
         this.leftFrame.right = { x1: leftEyeCenter[0] + frameWidth/2, y1: topY, x2: leftEyeCenter[0] + frameWidth/2, y2: botY };
 
-        // Right frame (green) - same size as left, centered on right eye
         this.rightFrame.top = { x1: rightEyeCenter[0] - frameWidth/2, y1: topY, x2: rightEyeCenter[0] + frameWidth/2, y2: topY };
         this.rightFrame.bottom = { x1: rightEyeCenter[0] - frameWidth/2, y1: botY, x2: rightEyeCenter[0] + frameWidth/2, y2: botY };
         this.rightFrame.left = { x1: rightEyeCenter[0] - frameWidth/2, y1: topY, x2: rightEyeCenter[0] - frameWidth/2, y2: botY };
         this.rightFrame.right = { x1: rightEyeCenter[0] + frameWidth/2, y1: topY, x2: rightEyeCenter[0] + frameWidth/2, y2: botY };
 
-        log('Frame lines initialized (narrow equal frames) - drag corners to adjust');
+        log('Frame lines initialized');
       },
 
       processPhotoMode(lm) {
-        // Initialize lines if not set
         if (!this.leftFrame.top) {
           this.initLines(lm);
         }
-
         this.drawPhotoMode();
       },
 
       drawPhotoMode() {
         ctx.clearRect(0, 0, W, H);
-
         if (!this.leftFrame.top) return;
 
-        // Draw BOTH frames in green with FULL OPACITY (both fully visible and movable)
-        
-        // Determine which is active
         const isLeftActive = this.activeFrame === 'left';
         
-        // Draw LEFT frame
-        ctx.strokeStyle = isLeftActive ? '#00ff00' : '#00ff00';
-        ctx.lineWidth = isLeftActive ? 3 : 3;
+        ctx.strokeStyle = '#00ff00';
+        ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(this.leftFrame.top.x1, this.leftFrame.top.y1);
         ctx.lineTo(this.leftFrame.top.x2, this.leftFrame.top.y2);
@@ -739,7 +714,6 @@
         ctx.closePath();
         ctx.stroke();
 
-        // Draw left frame corner handles
         ctx.fillStyle = isLeftActive ? '#00ff00' : 'rgba(0, 255, 0, 0.6)';
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 2;
@@ -758,9 +732,8 @@
           ctx.stroke();
         });
 
-        // Draw RIGHT frame
-        ctx.strokeStyle = !isLeftActive ? '#00ff00' : '#00ff00';
-        ctx.lineWidth = !isLeftActive ? 3 : 3;
+        ctx.strokeStyle = '#00ff00';
+        ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(this.rightFrame.top.x1, this.rightFrame.top.y1);
         ctx.lineTo(this.rightFrame.top.x2, this.rightFrame.top.y2);
@@ -771,7 +744,6 @@
         ctx.closePath();
         ctx.stroke();
 
-        // Draw right frame corner handles
         ctx.fillStyle = !isLeftActive ? '#00ff00' : 'rgba(0, 255, 0, 0.6)';
         ctx.strokeStyle = '#ffffff';
         ctx.lineWidth = 2;
@@ -790,7 +762,6 @@
           ctx.stroke();
         });
 
-        // Calculate and display measurements
         if (this.pixelsPerMm) {
           const leftWidth = this.dist(
             [this.leftFrame.top.x1, this.leftFrame.top.y1], 
@@ -825,9 +796,6 @@
           ctx.fillText(`Right: ${Math.round(rightWidth)}×${Math.round(rightHeight)} mm`, 20, 65);
           ctx.fillText(`Bridge: ${Math.round(bridgeW)} mm`, 20, 95);
 
-          log(`Left: ${Math.round(leftWidth)}×${Math.round(leftHeight)}mm | Right: ${Math.round(rightWidth)}×${Math.round(rightHeight)}mm | Bridge: ${Math.round(bridgeW)}mm`);
-
-          // Store measurements
           state.lastMeasurement = {
             leftWidth: Math.round(leftWidth),
             leftHeight: Math.round(leftHeight),
@@ -839,9 +807,8 @@
 
         ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
         ctx.font = '14px system-ui';
-        ctx.fillText(`Drag GREEN corners to adjust ${this.activeFrame.toUpperCase()} frame | Toggle to switch frames`, 20, H - 20);
+        ctx.fillText(`Drag corners to adjust ${this.activeFrame.toUpperCase()} frame | Toggle to switch | Retake for new photo`, 20, H - 20);
 
-        // Active frame indicator
         ctx.fillStyle = '#ffff00';
         ctx.font = 'bold 16px system-ui';
         ctx.fillText(`Active: ${this.activeFrame.toUpperCase()} Frame`, W - 200, 30);
@@ -868,17 +835,23 @@
       if (state.running) return;
       state.running = true;
       state.photoMode = false;
-      state.isStable = false;
-      state.stabilityCounter = 0;
+      state.alignmentHoldFrames = 0;
+      state.autoCapturing = false;
       log('Starting camera...');
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { width: W, height: H, facingMode: 'user' } 
+          video: { 
+            width: W, 
+            height: H, 
+            facingMode: state.currentCamera
+          } 
         });
         video.srcObject = stream;
         video.style.display = 'block';
         capturedImg.style.display = 'none';
+
+        document.getElementById(`switch-camera-${state.currentTab}`).disabled = false;
 
         video.onloadedmetadata = async () => {
           log('Initializing MediaPipe Face Mesh...');
@@ -892,14 +865,13 @@
             refineLandmarks: true,
             minDetectionConfidence: 0.6,
             minTrackingConfidence: 0.6,
-            selfieMode: true
+            selfieMode: state.currentCamera === 'user'
           });
           
           state.faceMesh.onResults((results) => {
             if (!state.running) return;
             
             if (state.photoMode) {
-              // In photo mode, process the captured landmarks
               if (state.capturedLandmarks) {
                 if (state.currentTab === 'pupil') {
                   pupilDetector.processPhotoMode(state.capturedLandmarks);
@@ -908,7 +880,6 @@
                 }
               }
             } else {
-              // In live view mode
               if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
                 const lm = results.multiFaceLandmarks[0];
                 if (state.currentTab === 'pupil') {
@@ -917,8 +888,7 @@
                   frameFitter.processLiveView(lm);
                 }
               } else {
-                state.stabilityCounter = 0;
-                state.isStable = false;
+                state.alignmentHoldFrames = 0;
               }
             }
           });
@@ -933,7 +903,7 @@
           };
           
           await state.faceMesh.initialize();
-          log('System ready! Keep stable for 2 seconds to enable capture');
+          log(`Camera ready (${state.currentCamera === 'user' ? 'Front' : 'Back'})`);
           processFrame();
         };
       } catch (e) { 
@@ -946,8 +916,8 @@
       if (!state.running) return;
       state.running = false;
       state.photoMode = false;
-      state.isStable = false;
-      state.stabilityCounter = 0;
+      state.alignmentHoldFrames = 0;
+      state.autoCapturing = false;
       state.capturedLandmarks = null;
       log('Stopping camera...');
       
@@ -971,46 +941,59 @@
       video.style.display = 'block';
       capturedImg.style.display = 'none';
       
-      // Reset buttons
       if (state.currentTab === 'pupil') {
-        document.getElementById('capture-photo-pupil').disabled = true;
+        document.getElementById('retake-pupil').disabled = true;
+        document.getElementById('retake-pupil').style.display = 'none';
         document.getElementById('save-pupil').disabled = true;
+        document.getElementById('switch-camera-pupil').disabled = true;
         const indicator = document.getElementById('pupil-stable');
-        indicator.textContent = 'Waiting for stable position...';
-        indicator.classList.remove('stable');
+        indicator.textContent = 'Align your face';
+        indicator.classList.remove('stable', 'capturing');
       } else {
-        document.getElementById('capture-photo-frame').disabled = true;
+        document.getElementById('retake-frame').disabled = true;
+        document.getElementById('retake-frame').style.display = 'none';
         document.getElementById('save-frame').disabled = true;
         document.getElementById('toggle-frame').disabled = true;
+        document.getElementById('switch-camera-frame').disabled = true;
         const indicator = document.getElementById('frame-stable');
-        indicator.textContent = 'Waiting for stable position...';
-        indicator.classList.remove('stable');
+        indicator.textContent = 'Keep stable';
+        indicator.classList.remove('stable', 'capturing');
       }
       
       log('Camera stopped');
     }
 
+    async function switchCamera() {
+      if (!state.running) return;
+      
+      log('Switching camera...');
+      state.currentCamera = state.currentCamera === 'user' ? 'environment' : 'user';
+      
+      stopCamera();
+      
+      setTimeout(() => {
+        startCamera();
+      }, 500);
+    }
+
     async function capturePhoto() {
-      if (!state.running || !state.isStable) {
-        log('Wait for stable position before capturing!');
+      if (!state.running) {
+        log('Start camera first!');
         return;
       }
 
       log('Capturing photo...');
       
-      // Create a canvas to capture current video frame (clean, no overlays)
       const captureCanvas = document.createElement('canvas');
       captureCanvas.width = W;
       captureCanvas.height = H;
       const captureCtx = captureCanvas.getContext('2d');
       captureCtx.drawImage(video, 0, 0, W, H);
       
-      // Convert to image
       const imageData = captureCanvas.toDataURL('image/png');
       capturedImg.src = imageData;
       state.capturedImage = imageData;
       
-      // Process the image to get landmarks
       const img = new Image();
       img.onload = async () => {
         const results = await new Promise((resolve) => {
@@ -1023,7 +1006,7 @@
             refineLandmarks: true,
             minDetectionConfidence: 0.6,
             minTrackingConfidence: 0.6,
-            selfieMode: true
+            selfieMode: state.currentCamera === 'user'
           });
           
           tempFaceMesh.onResults((res) => {
@@ -1039,31 +1022,72 @@
         if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
           state.capturedLandmarks = results.multiFaceLandmarks[0];
           
-          // Switch to photo mode
           state.photoMode = true;
           video.style.display = 'none';
           capturedImg.style.display = 'block';
           
-          // Process the captured image
           if (state.currentTab === 'pupil') {
             pupilDetector.processPhotoMode(state.capturedLandmarks);
             document.getElementById('save-pupil').disabled = false;
-            document.getElementById('capture-photo-pupil').disabled = false;
-            document.getElementById('capture-photo-pupil').textContent = 'Recapture Photo';
+            document.getElementById('retake-pupil').disabled = false;
+            document.getElementById('retake-pupil').style.display = 'inline-block';
+            const indicator = document.getElementById('pupil-stable');
+            indicator.textContent = 'Photo captured! Adjust and save';
+            indicator.classList.remove('capturing');
+            indicator.classList.add('stable');
           } else {
             frameFitter.processPhotoMode(state.capturedLandmarks);
             document.getElementById('save-frame').disabled = false;
             document.getElementById('toggle-frame').disabled = false;
-            document.getElementById('capture-photo-frame').disabled = false;
-            document.getElementById('capture-photo-frame').textContent = 'Recapture Photo';
+            document.getElementById('retake-frame').disabled = false;
+            document.getElementById('retake-frame').style.display = 'inline-block';
+            const indicator = document.getElementById('frame-stable');
+            indicator.textContent = 'Photo captured! Adjust and save';
+            indicator.classList.remove('capturing');
+            indicator.classList.add('stable');
           }
           
-          log('Photo captured! Adjust measurements by dragging and click Save Result');
+          log('Photo captured! Adjust measurements and save result');
         } else {
-          log('Failed to detect face in captured image. Please try again.');
+          log('Failed to detect face. Please try again.');
+          state.photoMode = false;
+          state.alignmentHoldFrames = 0;
         }
       };
       img.src = imageData;
+    }
+
+    function retakePhoto() {
+      log('Retaking photo...');
+      
+      if (state.currentTab === 'pupil') {
+        pupilDetector.reset();
+        document.getElementById('retake-pupil').disabled = true;
+        document.getElementById('retake-pupil').style.display = 'none';
+        document.getElementById('save-pupil').disabled = true;
+        const indicator = document.getElementById('pupil-stable');
+        indicator.textContent = 'Align your face';
+        indicator.classList.remove('stable', 'capturing');
+      } else {
+        frameFitter.reset();
+        document.getElementById('retake-frame').disabled = true;
+        document.getElementById('retake-frame').style.display = 'none';
+        document.getElementById('save-frame').disabled = true;
+        document.getElementById('toggle-frame').disabled = true;
+        const indicator = document.getElementById('frame-stable');
+        indicator.textContent = 'Keep stable';
+        indicator.classList.remove('stable', 'capturing');
+      }
+      
+      state.photoMode = false;
+      state.capturedLandmarks = null;
+      state.capturedImage = null;
+      state.alignmentHoldFrames = 0;
+      state.autoCapturing = false;
+      
+      video.style.display = 'block';
+      capturedImg.style.display = 'none';
+      ctx.clearRect(0, 0, W, H);
     }
 
     function saveResult() {
@@ -1077,13 +1101,9 @@
       tempCanvas.height = H;
       const tempCtx = tempCanvas.getContext('2d');
       
-      // Draw captured image
       tempCtx.drawImage(capturedImg, 0, 0, W, H);
-      
-      // Draw overlay with measurements
       tempCtx.drawImage(canvas, 0, 0);
       
-      // Add measurement text overlay
       tempCtx.fillStyle = 'rgba(0, 0, 0, 0.8)';
       tempCtx.fillRect(0, H - 120, W, 120);
       
@@ -1092,15 +1112,15 @@
       
       if (state.currentTab === 'pupil' && state.lastMeasurement) {
         const m = state.lastMeasurement;
-        tempCtx.fillText(`Pupillary Distance (PD): ${m.pd} mm`, 20, H - 90);
-        tempCtx.fillText(`Left Eye to Nose: ${m.leftNose} mm | Right Eye to Nose: ${m.rightNose} mm`, 20, H - 65);
-        tempCtx.fillText(`Head Tilt: ${m.tilt}° | Estimated Distance: ${m.distance} mm`, 20, H - 40);
+        tempCtx.fillText(`PD: ${m.pd} mm`, 20, H - 90);
+        tempCtx.fillText(`Left→Nose: ${m.leftNose} mm | Right→Nose: ${m.rightNose} mm`, 20, H - 65);
+        tempCtx.fillText(`Tilt: ${m.tilt}° | Distance: ${m.distance} mm`, 20, H - 40);
         tempCtx.font = '14px system-ui';
         tempCtx.fillText(`Timestamp: ${new Date().toLocaleString()}`, 20, H - 15);
       } else if (state.currentTab === 'frame' && state.lastMeasurement) {
         const m = state.lastMeasurement;
-        tempCtx.fillText(`Left Frame: ${m.leftWidth} × ${m.leftHeight} mm | Right Frame: ${m.rightWidth} × ${m.rightHeight} mm`, 20, H - 90);
-        tempCtx.fillText(`Bridge Width: ${m.bridge} mm`, 20, H - 65);
+        tempCtx.fillText(`Left: ${m.leftWidth}×${m.leftHeight} mm | Right: ${m.rightWidth}×${m.rightHeight} mm`, 20, H - 90);
+        tempCtx.fillText(`Bridge: ${m.bridge} mm`, 20, H - 65);
         tempCtx.font = '14px system-ui';
         tempCtx.fillText(`Timestamp: ${new Date().toLocaleString()}`, 20, H - 40);
       }
@@ -1112,7 +1132,7 @@
         a.download = `${state.currentTab}_measurement_${Date.now()}.png`;
         a.click();
         URL.revokeObjectURL(url);
-        log(`✓ Saved: ${a.download}`);
+        log(`Saved: ${a.download}`);
       });
     }
 
@@ -1140,10 +1160,8 @@
           pupilDetector.isDragging = true;
         }
       } else {
-        // Check BOTH frames for dragging (not just active frame)
         if (!frameFitter.leftFrame.top) return;
         
-        // Check left frame handles
         const leftHandles = [
           { name: 'left-top-left', frame: 'left', pos: [frameFitter.leftFrame.top.x1, frameFitter.leftFrame.top.y1] },
           { name: 'left-top-right', frame: 'left', pos: [frameFitter.leftFrame.top.x2, frameFitter.leftFrame.top.y2] },
@@ -1151,7 +1169,6 @@
           { name: 'left-bottom-right', frame: 'left', pos: [frameFitter.leftFrame.bottom.x2, frameFitter.leftFrame.bottom.y2] }
         ];
         
-        // Check right frame handles
         const rightHandles = [
           { name: 'right-top-left', frame: 'right', pos: [frameFitter.rightFrame.top.x1, frameFitter.rightFrame.top.y1] },
           { name: 'right-top-right', frame: 'right', pos: [frameFitter.rightFrame.top.x2, frameFitter.rightFrame.top.y2] },
@@ -1164,10 +1181,9 @@
         for (const h of allHandles) {
           if (frameFitter.dist([x, y], h.pos) < 20) {
             frameFitter.dragging = h.name;
-            frameFitter.activeFrame = h.frame; // Switch to that frame when dragging
+            frameFitter.activeFrame = h.frame;
             frameFitter.dragOffset = [x - h.pos[0], y - h.pos[1]];
             
-            // Update button text
             const btn = document.getElementById('toggle-frame');
             btn.textContent = `Toggle Frame (${frameFitter.activeFrame === 'left' ? 'Left' : 'Right'})`;
             break;
@@ -1189,15 +1205,11 @@
         } else if (pupilDetector.selectedEye === 'right') {
           pupilDetector.manualRightPupil = [x, y];
         }
-        
-        // Redraw with new position
         pupilDetector.processPhotoMode(state.capturedLandmarks);
-        
       } else if (state.currentTab === 'frame' && frameFitter.dragging) {
-        // Determine which frame is being dragged based on handle name
         const isDraggingLeft = frameFitter.dragging.startsWith('left-');
         const currentFrame = isDraggingLeft ? frameFitter.leftFrame : frameFitter.rightFrame;
-        const handleType = frameFitter.dragging.split('-').slice(-2).join('-'); // e.g., "top-left"
+        const handleType = frameFitter.dragging.split('-').slice(-2).join('-');
         
         const nx = x - frameFitter.dragOffset[0];
         const ny = y - frameFitter.dragOffset[1];
@@ -1232,8 +1244,6 @@
             currentFrame.top.x2 = nx;
             break;
         }
-        
-        // Redraw with new position
         frameFitter.processPhotoMode(state.capturedLandmarks);
       }
     });
@@ -1244,25 +1254,22 @@
       frameFitter.dragging = null;
     });
 
-    // Touch events for mobile
     canvas.addEventListener('touchstart', (e) => {
       e.preventDefault();
       const touch = e.touches[0];
-      const mouseEvent = new MouseEvent('mousedown', {
+      canvas.dispatchEvent(new MouseEvent('mousedown', {
         clientX: touch.clientX,
         clientY: touch.clientY
-      });
-      canvas.dispatchEvent(mouseEvent);
+      }));
     });
 
     canvas.addEventListener('touchmove', (e) => {
       e.preventDefault();
       const touch = e.touches[0];
-      const mouseEvent = new MouseEvent('mousemove', {
+      canvas.dispatchEvent(new MouseEvent('mousemove', {
         clientX: touch.clientX,
         clientY: touch.clientY
-      });
-      canvas.dispatchEvent(mouseEvent);
+      }));
     });
 
     canvas.addEventListener('touchend', (e) => {
@@ -1278,33 +1285,17 @@
     });
 
     document.getElementById('stop-pupil').addEventListener('click', stopCamera);
-
-    document.getElementById('capture-photo-pupil').addEventListener('click', () => {
-      if (state.photoMode) {
-        // Recapture - restart camera
-        pupilDetector.reset();
-        state.photoMode = false;
-        state.capturedLandmarks = null;
-        document.getElementById('capture-photo-pupil').textContent = 'Capture Photo';
-        document.getElementById('save-pupil').disabled = true;
-        video.style.display = 'block';
-        capturedImg.style.display = 'none';
-        log('Restarting camera for new capture...');
-      } else {
-        capturePhoto();
-      }
-    });
+    document.getElementById('switch-camera-pupil').addEventListener('click', switchCamera);
+    document.getElementById('retake-pupil').addEventListener('click', retakePhoto);
+    document.getElementById('save-pupil').addEventListener('click', saveResult);
 
     document.getElementById('reset-auto').addEventListener('click', () => {
       pupilDetector.reset();
       log('Reset manual adjustments');
-      
       if (state.photoMode && state.capturedLandmarks) {
         pupilDetector.processPhotoMode(state.capturedLandmarks);
       }
     });
-
-    document.getElementById('save-pupil').addEventListener('click', saveResult);
 
     document.getElementById('start-frame').addEventListener('click', () => {
       state.currentTab = 'frame';
@@ -1313,27 +1304,12 @@
     });
 
     document.getElementById('stop-frame').addEventListener('click', stopCamera);
-
-    document.getElementById('capture-photo-frame').addEventListener('click', () => {
-      if (state.photoMode) {
-        // Recapture - restart camera
-        frameFitter.reset();
-        state.photoMode = false;
-        state.capturedLandmarks = null;
-        document.getElementById('capture-photo-frame').textContent = 'Capture Photo';
-        document.getElementById('save-frame').disabled = true;
-        document.getElementById('toggle-frame').disabled = true;
-        video.style.display = 'block';
-        capturedImg.style.display = 'none';
-        log('Restarting camera for new capture...');
-      } else {
-        capturePhoto();
-      }
-    });
+    document.getElementById('switch-camera-frame').addEventListener('click', switchCamera);
+    document.getElementById('retake-frame').addEventListener('click', retakePhoto);
+    document.getElementById('save-frame').addEventListener('click', saveResult);
 
     document.getElementById('toggle-frame').addEventListener('click', () => {
       frameFitter.toggleFrame();
-      
       if (state.photoMode && state.capturedLandmarks) {
         frameFitter.processPhotoMode(state.capturedLandmarks);
       }
@@ -1341,7 +1317,6 @@
 
     document.getElementById('reset-frame').addEventListener('click', () => {
       frameFitter.reset();
-      
       if (state.photoMode && state.capturedLandmarks) {
         frameFitter.processPhotoMode(state.capturedLandmarks);
       } else {
@@ -1349,30 +1324,23 @@
       }
     });
 
-    document.getElementById('save-frame').addEventListener('click', saveResult);
-
-    // ==================== KEYBOARD SHORTCUTS ====================
     document.addEventListener('keydown', (e) => {
       if (!state.running) return;
-
       if (state.currentTab === 'pupil' && state.photoMode) {
-        switch (e.key.toLowerCase()) {
-          case 'r':
-            pupilDetector.reset();
-            log('Reset manual adjustments');
-            if (state.capturedLandmarks) {
-              pupilDetector.processPhotoMode(state.capturedLandmarks);
-            }
-            break;
+        if (e.key.toLowerCase() === 'r') {
+          pupilDetector.reset();
+          log('Reset manual adjustments');
+          if (state.capturedLandmarks) {
+            pupilDetector.processPhotoMode(state.capturedLandmarks);
+          }
         }
       }
-      
       if (e.key === 'Escape') {
         stopCamera();
       }
     });
 
-    log('OptiFocus ready. Select a tab and start camera.');
+    log('OptiFocus ready. Start camera to begin auto-capture measurement.');
   </script>
 </body>
 </html>
