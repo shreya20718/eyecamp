@@ -389,13 +389,14 @@ video, canvas, #capturedImg {
       },
 
       processLiveView(lm) {
-  const center = [W / 2, H / 2];
-  const axisX = W * 0.28, axisY = H * 0.42;
+ const center = [W / 2, H / 2];
+const axisX = W * 0.22, axisY = H * 0.35;
+
         
         const foreheadLandmark = lm[10];
         const foreheadCenter = [foreheadLandmark.x * W, foreheadLandmark.y * H];
         const foreheadTargetY = center[1] - (axisY * 0.7); 
-        const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) < 50;
+        const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) < 45;
 
         const stableIndicator = document.getElementById('pupil-stable');
         
