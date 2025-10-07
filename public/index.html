@@ -83,33 +83,21 @@
     button.camera-switch:hover {
       background: #F57C00;
     }
-  #viewport {
-  position: relative;
-  width: 100%;
-  max-width: 1280px;
-  margin: 0 auto;
-  background: #000;
-  border: 2px solid #4CAF50;
-  border-radius: 8px;
-  overflow: hidden;
-  min-height: 480px;
-  aspect-ratio: 4/3; /* Add this line */
-}
-@media (max-width: 768px) {
-  #viewport {
-    border-radius: 4px;
-    border-width: 1px;
-    min-height: 70vh;
-    max-height: 75vh;
-    aspect-ratio: unset; /* Add this line */
-  }
-}
- video, canvas, #capturedImg {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
+    #viewport {
+      position: relative;
+      width: 100%;
+      max-width: 960px;
+      margin: 0 auto;
+      background: #000;
+      border: 2px solid #4CAF50;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    video, canvas, #capturedImg {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
     video {
       position: absolute;
       top: 0;
@@ -140,6 +128,21 @@
     }
     .tab-content { display: none; }
     .tab-content.active { display: block; }
+    .instructions {
+      background: #2a2a2a;
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 15px;
+      border-left: 4px solid #4CAF50;
+    }
+    .instructions h3 {
+      margin-bottom: 8px;
+      color: #4CAF50;
+    }
+    .instructions ul {
+      margin-left: 20px;
+      line-height: 1.8;
+    }
     .stable-indicator {
       background: #2a2a2a;
       padding: 10px 15px;
@@ -164,14 +167,6 @@
       0%, 100% { opacity: 1; }
       50% { opacity: 0.7; }
     }
-    
-   @media (max-width: 768px) {
-  video, canvas, #capturedImg {
-    height: 100%;
-    object-fit: cover;
-  }
-}
-
   </style>
 </head>
 <body>
@@ -184,6 +179,8 @@
     </div>
 
     <div id="pupil-tab" class="tab-content active">
+      
+     
       <div class="stable-indicator" id="pupil-stable">
         Align your face
       </div>
@@ -199,6 +196,8 @@
     </div>
 
     <div id="frame-tab" class="tab-content">
+      
+     
       <div class="stable-indicator" id="frame-stable">
         Keep stable
       </div>
@@ -246,12 +245,12 @@
     const ctx = canvas.getContext('2d');
     const logEl = document.getElementById('log');
 
-    const W = 1280, H = 960;
+    const W = 960, H = 720;
     canvas.width = W;
     canvas.height = H;
 
-    const PUPIL_HOLD_FRAMES = 90;
-    const FRAME_HOLD_FRAMES = 60;
+    const PUPIL_HOLD_FRAMES = 90; // 3 seconds at 30fps
+    const FRAME_HOLD_FRAMES = 60; // 2 seconds at 30fps
 
     function log(msg) {
       const time = new Date().toLocaleTimeString();
@@ -273,6 +272,7 @@
       });
     });
 
+    // ==================== PUPIL DETECTOR ====================
     const pupilDetector = {
       LEFT_EYE_IDX: [362, 385, 387, 263, 373, 386],
       RIGHT_EYE_IDX: [33, 160, 158, 133, 153, 159],
@@ -319,15 +319,12 @@
 
       processLiveView(lm) {
         const center = [W / 2, H / 2];
-        const isMobile = window.innerWidth <= 768;
-const axisX = isMobile ? W * 0.35 : W * 0.23;
-const axisY = isMobile ? H * 0.55 : H * 0.40;
+        const axisX = W * 0.23, axisY = H * 0.40;
        
         const foreheadLandmark = lm[10];
         const foreheadCenter = [foreheadLandmark.x * W, foreheadLandmark.y * H];
         const foreheadTargetY = center[1] - (axisY * 0.7);
-      const alignmentThreshold = isMobile ? 60 : 40;
-const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) < alignmentThreshold;
+        const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) < 40;
 
         const stableIndicator = document.getElementById('pupil-stable');
        
@@ -363,16 +360,16 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
         ctx.clearRect(0, 0, W, H);
        
         ctx.strokeStyle = 'rgba(130, 190, 255, 0.9)';
-        ctx.lineWidth = 5;
+        ctx.lineWidth = 4;
         ctx.beginPath();
         ctx.ellipse(ctr[0], ctr[1], axX, axY, 0, 0, Math.PI * 2);
         ctx.stroke();
 
         const targetColor = fAligned ? '#00ff00' : '#ffff00';
-        const targetSize = 12;
+        const targetSize = 10;
        
         ctx.strokeStyle = targetColor;
-        ctx.lineWidth = 4;
+        ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(ctr[0] - targetSize, fTargetY);
         ctx.lineTo(ctr[0] + targetSize, fTargetY);
@@ -383,15 +380,16 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
         if (fCenter) {
           ctx.fillStyle = fAligned ? '#00ff00' : '#f44336';
           ctx.beginPath();
-          ctx.arc(fCenter[0], fCenter[1], 6, 0, Math.PI * 2);
+          ctx.arc(fCenter[0], fCenter[1], 5, 0, Math.PI * 2);
           ctx.fill();
         }
 
+        // Progress bar
         if (progress > 0) {
-          const barWidth = 400;
-          const barHeight = 25;
+          const barWidth = 300;
+          const barHeight = 20;
           const barX = (W - barWidth) / 2;
-          const barY = H - 100;
+          const barY = H - 80;
          
           ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
           ctx.fillRect(barX - 5, barY - 5, barWidth + 10, barHeight + 10);
@@ -404,15 +402,15 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
           ctx.fillRect(barX, barY, barWidth * progress, barHeight);
          
           ctx.fillStyle = '#fff';
-          ctx.font = 'bold 14px system-ui';
+          ctx.font = 'bold 12px system-ui';
           ctx.textAlign = 'center';
-          ctx.fillText(`${Math.round(progress * 100)}%`, W / 2, barY + 17);
+          ctx.fillText(`${Math.round(progress * 100)}%`, W / 2, barY + 15);
           ctx.textAlign = 'left';
         }
 
         ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-        ctx.font = '16px system-ui';
-        ctx.fillText('Align and hold steady - auto-capture in 3 seconds', W/2 - 220, H - 30);
+        ctx.font = '14px system-ui';
+        ctx.fillText('Align and hold steady - auto-capture in 3 seconds', W/2 - 180, H - 20);
       },
 
       processPhotoMode(lm) {
@@ -468,12 +466,12 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
         const irisDiameterPx = (leftIrisPx + rightIrisPx) / 2;
        
         const irisRadiusPx = irisDiameterPx / 2;
-        const crossSize = irisRadiusPx * 0.2;
+        const crossSize = irisRadiusPx * 0.15;
 
         if (nose) {
           ctx.strokeStyle = 'rgba(255,255,0,0.8)';
-          ctx.lineWidth = 3;
-          ctx.setLineDash([6, 6]);
+          ctx.lineWidth = 2;
+          ctx.setLineDash([5, 5]);
           ctx.beginPath();
           ctx.moveTo(0, nose[1]);
           ctx.lineTo(W, nose[1]);
@@ -483,7 +481,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
 
         const crossColor = isAccurate ? '#00ff00' : '#ffaa00';
         ctx.strokeStyle = crossColor;
-        ctx.lineWidth = 4;
+        ctx.lineWidth = 3;
        
         if (fL) {
           ctx.beginPath();
@@ -495,7 +493,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
          
           ctx.fillStyle = crossColor;
           ctx.beginPath();
-          ctx.arc(fL[0], fL[1], 4, 0, Math.PI * 2);
+          ctx.arc(fL[0], fL[1], 3, 0, Math.PI * 2);
           ctx.fill();
         }
        
@@ -509,13 +507,13 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
          
           ctx.fillStyle = crossColor;
           ctx.beginPath();
-          ctx.arc(fR[0], fR[1], 4, 0, Math.PI * 2);
+          ctx.arc(fR[0], fR[1], 3, 0, Math.PI * 2);
           ctx.fill();
         }
        
         if (fL && fR) {
           ctx.strokeStyle = 'rgba(255,0,0,0.6)';
-          ctx.lineWidth = 3;
+          ctx.lineWidth = 2;
           ctx.beginPath();
           ctx.moveTo(fL[0], fL[1]);
           ctx.lineTo(fR[0], fR[1]);
@@ -523,33 +521,33 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
         }
 
         ctx.fillStyle = isAccurate ? 'rgba(0, 255, 0, 0.95)' : 'rgba(255, 165, 0, 0.95)';
-        ctx.font = 'bold 16px system-ui';
-        ctx.fillText(isAccurate ? '✓ High Accuracy' : '⚠ Medium Accuracy', 20, H - 60);
+        ctx.font = 'bold 14px system-ui';
+        ctx.fillText(isAccurate ? '✓ High Accuracy' : '⚠ Medium Accuracy', 20, H - 45);
 
         const man = [];
         if (this.manualLeftPupil) man.push("L");
         if (this.manualRightPupil) man.push("R");
         if (man.length) {
           ctx.fillStyle = '#000000';
-          ctx.font = 'bold 16px system-ui';
-          ctx.fillText("Manual: " + man.join(","), W - 150, 35);
+          ctx.font = 'bold 14px system-ui';
+          ctx.fillText("Manual: " + man.join(","), W - 150, 30);
         }
 
         ctx.fillStyle = '#000000';
-        ctx.font = 'bold 24px system-ui';
-        ctx.fillText(`PD: ${Math.round(pd)} mm`, 20, 40);
+        ctx.font = 'bold 20px system-ui';
+        ctx.fillText(`PD: ${Math.round(pd)} mm`, 20, 35);
        
-        ctx.font = '18px system-ui';
-        ctx.fillText(`Left→Nose: ${Math.round(lNose)} mm`, 20, 75);
-        ctx.fillText(`Right→Nose: ${Math.round(rNose)} mm`, 20, 105);
-        ctx.fillText(`Tilt: ${Math.round(tilt)}°`, 20, 135);
+        ctx.font = '16px system-ui';
+        ctx.fillText(`Left→Nose: ${Math.round(lNose)} mm`, 20, 65);
+        ctx.fillText(`Right→Nose: ${Math.round(rNose)} mm`, 20, 90);
+        ctx.fillText(`Tilt: ${Math.round(tilt)}°`, 20, 115);
         if (dist) {
-          ctx.fillText(`Distance: ${dist} mm`, 20, 165);
+          ctx.fillText(`Distance: ${dist} mm`, 20, 140);
         }
 
         ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-        ctx.font = '16px system-ui';
-        ctx.fillText('Drag crosses to adjust | Press R to reset | Click Retake for new photo', 20, H - 30);
+        ctx.font = '14px system-ui';
+        ctx.fillText('Drag crosses to adjust | Press R to reset | Click Retake for new photo', 20, H - 20);
       },
 
       reset() {
@@ -558,6 +556,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
       }
     };
 
+    // ==================== FRAME FITTER ====================
     const frameFitter = {
       landmarks: null,
       pixelsPerMm: null,
@@ -615,11 +614,12 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
       drawLiveView(progress) {
         ctx.clearRect(0, 0, W, H);
        
+        // Progress bar
         if (progress > 0) {
-          const barWidth = 400;
-          const barHeight = 25;
+          const barWidth = 300;
+          const barHeight = 20;
           const barX = (W - barWidth) / 2;
-          const barY = H - 100;
+          const barY = H - 80;
          
           ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
           ctx.fillRect(barX - 5, barY - 5, barWidth + 10, barHeight + 10);
@@ -632,15 +632,15 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
           ctx.fillRect(barX, barY, barWidth * progress, barHeight);
          
           ctx.fillStyle = '#fff';
-          ctx.font = 'bold 14px system-ui';
+          ctx.font = 'bold 12px system-ui';
           ctx.textAlign = 'center';
-          ctx.fillText(`${Math.round(progress * 100)}%`, W / 2, barY + 17);
+          ctx.fillText(`${Math.round(progress * 100)}%`, W / 2, barY + 15);
           ctx.textAlign = 'left';
         }
        
         ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-        ctx.font = '16px system-ui';
-        ctx.fillText('Keep stable - auto-capture in 2 seconds', W/2 - 180, H - 30);
+        ctx.font = '14px system-ui';
+        ctx.fillText('Keep stable - auto-capture in 2 seconds', W/2 - 150, H - 20);
       },
 
       initLines(lm) {
@@ -649,10 +649,10 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
         const lCheek = [lm[205].x * W, lm[205].y * H];
         const rCheek = [lm[425].x * W, lm[425].y * H];
 
-        const topY = Math.min(lBrow[1], rBrow[1]) - 25;
-        const botY = Math.max(lCheek[1], rCheek[1]) - 35;
+        const topY = Math.min(lBrow[1], rBrow[1]) - 20;
+        const botY = Math.max(lCheek[1], rCheek[1]) - 30;
        
-        const frameWidth = 65;
+        const frameWidth = 50;
         const leftEyeCenter = [lm[468].x * W, lm[468].y * H];
         const rightEyeCenter = [lm[473].x * W, lm[473].y * H];
 
@@ -683,7 +683,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
         const isLeftActive = this.activeFrame === 'left';
        
         ctx.strokeStyle = '#00ff00';
-        ctx.lineWidth = 4;
+        ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(this.leftFrame.top.x1, this.leftFrame.top.y1);
         ctx.lineTo(this.leftFrame.top.x2, this.leftFrame.top.y2);
@@ -696,7 +696,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
 
         ctx.fillStyle = isLeftActive ? '#00ff00' : 'rgba(0, 255, 0, 0.6)';
         ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2;
        
         const leftHandles = [
           [this.leftFrame.top.x1, this.leftFrame.top.y1],
@@ -707,13 +707,13 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
        
         leftHandles.forEach(([x, y]) => {
           ctx.beginPath();
-          ctx.arc(x, y, 12, 0, Math.PI * 2);
+          ctx.arc(x, y, 10, 0, Math.PI * 2);
           ctx.fill();
           ctx.stroke();
         });
 
         ctx.strokeStyle = '#00ff00';
-        ctx.lineWidth = 4;
+        ctx.lineWidth = 3;
         ctx.beginPath();
         ctx.moveTo(this.rightFrame.top.x1, this.rightFrame.top.y1);
         ctx.lineTo(this.rightFrame.top.x2, this.rightFrame.top.y2);
@@ -726,7 +726,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
 
         ctx.fillStyle = !isLeftActive ? '#00ff00' : 'rgba(0, 255, 0, 0.6)';
         ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2;
        
         const rightHandles = [
           [this.rightFrame.top.x1, this.rightFrame.top.y1],
@@ -737,7 +737,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
        
         rightHandles.forEach(([x, y]) => {
           ctx.beginPath();
-          ctx.arc(x, y, 12, 0, Math.PI * 2);
+          ctx.arc(x, y, 10, 0, Math.PI * 2);
           ctx.fill();
           ctx.stroke();
         });
@@ -769,12 +769,12 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
           ) / this.pixelsPerMm;
 
           ctx.fillStyle = 'rgba(255,255,0,0.95)';
-          ctx.font = 'bold 24px system-ui';
-          ctx.fillText(`Left: ${Math.round(leftWidth)}×${Math.round(leftHeight)} mm`, 20, 40);
+          ctx.font = 'bold 20px system-ui';
+          ctx.fillText(`Left: ${Math.round(leftWidth)}×${Math.round(leftHeight)} mm`, 20, 35);
          
-          ctx.font = '18px system-ui';
-          ctx.fillText(`Right: ${Math.round(rightWidth)}×${Math.round(rightHeight)} mm`, 20, 75);
-          ctx.fillText(`Bridge: ${Math.round(bridgeW)} mm`, 20, 110);
+          ctx.font = '16px system-ui';
+          ctx.fillText(`Right: ${Math.round(rightWidth)}×${Math.round(rightHeight)} mm`, 20, 65);
+          ctx.fillText(`Bridge: ${Math.round(bridgeW)} mm`, 20, 95);
 
           state.lastMeasurement = {
             leftWidth: Math.round(leftWidth),
@@ -786,12 +786,12 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
         }
 
         ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-        ctx.font = '16px system-ui';
-        ctx.fillText(`Drag corners to adjust ${this.activeFrame.toUpperCase()} frame | Toggle to switch | Retake for new photo`, 20, H - 30);
+        ctx.font = '14px system-ui';
+        ctx.fillText(`Drag corners to adjust ${this.activeFrame.toUpperCase()} frame | Toggle to switch | Retake for new photo`, 20, H - 20);
 
         ctx.fillStyle = '#ffff00';
-        ctx.font = 'bold 18px system-ui';
-        ctx.fillText(`Active: ${this.activeFrame.toUpperCase()} Frame`, W - 220, 35);
+        ctx.font = 'bold 16px system-ui';
+        ctx.fillText(`Active: ${this.activeFrame.toUpperCase()} Frame`, W - 200, 30);
       },
 
       toggleFrame() {
@@ -810,6 +810,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
       }
     };
 
+    // ==================== CAMERA & MEDIAPIPE ====================
     async function startCamera() {
       if (state.running) return;
       state.running = true;
@@ -1115,6 +1116,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
       });
     }
 
+    // ==================== MOUSE EVENTS ====================
     canvas.addEventListener('mousedown', (e) => {
       if (!state.photoMode) return;
      
@@ -1157,7 +1159,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
         const allHandles = [...leftHandles, ...rightHandles];
 
         for (const h of allHandles) {
-          if (frameFitter.dist([x, y], h.pos) < 25) {
+          if (frameFitter.dist([x, y], h.pos) < 20) {
             frameFitter.dragging = h.name;
             frameFitter.activeFrame = h.frame;
             frameFitter.dragOffset = [x - h.pos[0], y - h.pos[1]];
@@ -1255,6 +1257,7 @@ const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) 
       canvas.dispatchEvent(new MouseEvent('mouseup'));
     });
 
+    // ==================== BUTTON EVENTS ====================
     document.getElementById('start-pupil').addEventListener('click', () => {
       state.currentTab = 'pupil';
       pupilDetector.reset();
