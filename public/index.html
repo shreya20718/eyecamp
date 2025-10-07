@@ -83,21 +83,33 @@
     button.camera-switch:hover {
       background: #F57C00;
     }
-    #viewport {
-      position: relative;
-      width: 100%;
-      max-width: 1280px;
-      margin: 0 auto;
-      background: #000;
-      border: 2px solid #4CAF50;
-      border-radius: 8px;
-      overflow: hidden;
-    }
-    video, canvas, #capturedImg {
-      display: block;
-      width: 100%;
-      height: auto;
-    }
+  #viewport {
+  position: relative;
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  background: #000;
+  border: 2px solid #4CAF50;
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 480px;
+  aspect-ratio: 4/3; /* Add this line */
+}
+@media (max-width: 768px) {
+  #viewport {
+    border-radius: 4px;
+    border-width: 1px;
+    min-height: 70vh;
+    max-height: 75vh;
+    aspect-ratio: unset; /* Add this line */
+  }
+}
+ video, canvas, #capturedImg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
     video {
       position: absolute;
       top: 0;
@@ -152,12 +164,14 @@
       0%, 100% { opacity: 1; }
       50% { opacity: 0.7; }
     }
-    @media (max-width: 768px) {
-  #viewport {
-    min-height: 70vh;
-    max-height: 75vh;
+    
+   @media (max-width: 768px) {
+  video, canvas, #capturedImg {
+    height: 100%;
+    object-fit: cover;
   }
 }
+
   </style>
 </head>
 <body>
