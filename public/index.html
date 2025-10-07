@@ -152,6 +152,12 @@
       0%, 100% { opacity: 1; }
       50% { opacity: 0.7; }
     }
+    @media (max-width: 768px) {
+  #viewport {
+    min-height: 70vh;
+    max-height: 75vh;
+  }
+}
   </style>
 </head>
 <body>
@@ -299,12 +305,15 @@
 
       processLiveView(lm) {
         const center = [W / 2, H / 2];
-        const axisX = W * 0.23, axisY = H * 0.40;
+        const isMobile = window.innerWidth <= 768;
+const axisX = isMobile ? W * 0.35 : W * 0.23;
+const axisY = isMobile ? H * 0.55 : H * 0.40;
        
         const foreheadLandmark = lm[10];
         const foreheadCenter = [foreheadLandmark.x * W, foreheadLandmark.y * H];
         const foreheadTargetY = center[1] - (axisY * 0.7);
-        const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) < 40;
+      const alignmentThreshold = isMobile ? 60 : 40;
+const foreheadAligned = this.dist(foreheadCenter, [center[0], foreheadTargetY]) < alignmentThreshold;
 
         const stableIndicator = document.getElementById('pupil-stable');
        
